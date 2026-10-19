@@ -20,3 +20,4 @@ CLAUDE.local.md
 .antigravity_cli/
 web/node_modules/
 web/dist/
+.env
