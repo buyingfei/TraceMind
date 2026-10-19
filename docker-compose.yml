@@ -1,0 +1,30 @@
+# 本地基础设施（骨架阶段可不启动；后续接入 checkpoint / Milvus 时使用）
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: diagnose-agent-postgres
+    environment:
+      POSTGRES_USER: diagnose
+      POSTGRES_PASSWORD: diagnose
+      POSTGRES_DB: diagnose_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - diagnose_pg_data:/var/lib/postgresql/data
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: diagnose-agent-milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      COMMON_STORAGETYPE: local
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - diagnose_milvus_data:/var/lib/milvus
+
+volumes:
+  diagnose_pg_data:
+  diagnose_milvus_data:
