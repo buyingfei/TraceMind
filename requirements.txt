@@ -8,5 +8,9 @@ pydantic-settings>=2.0.0,<3.0.0
 langgraph>=0.2.0,<2.0.0
 httpx>=0.27.0,<1.0.0
 openai>=2.26.0,<3.0.0
+# 连接 Docker Milvus
+pymilvus>=3.0.0,<4.0.0
+# pymilvus 仍依赖 pkg_resources；setuptools 81+ 可能移除它
+setuptools>=77.0.3,<81
 pytest>=8.0.0,<9.0.0
 python-dotenv>=1.0.0,<2.0.0

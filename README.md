@@ -54,10 +54,28 @@ python main.py
 pytest -q
 ```
 
+## Milvus（向量库）
+
+仅支持 **Docker Milvus**（不使用本地 Lite）。
+
+**重要：** 环境变量用 `DIAGNOSE_MILVUS_URI`，不要用 `MILVUS_URI`（会被 pymilvus 误读）。
+
+```env
+DIAGNOSE_MILVUS_URI=http://127.0.0.1:19530
+```
+
+需保证 `milvus-standalone` + etcd + minio 均为 healthy。联调：
+
+```bash
+python -m indexer.index_codebase --demo
+# GET  /api/v1/milvus/health
+# POST /api/v1/milvus/search  {"query":"连锁自动入库","top_k":3}
+```
+
 ## 下一步（未做）
 
-1. 接入 DashScope（Qwen）与 Prompt
-2. 实现 diagnose 正式流水线节点
-3. 代码入库 Milvus + ripgrep 工具
+1. 实现 diagnose 正式流水线节点（第 0 期）
+2. 完整代码仓库入库 indexer
+3. ripgrep 关键词工具
 4. 业务库只读 SQL
 5. Vue 工单页

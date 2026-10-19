@@ -12,6 +12,8 @@ dependencies = [
     "langgraph>=0.2.0,<2.0.0",
     "httpx>=0.27.0,<1.0.0",
     "openai>=2.26.0,<3.0.0",
+    "pymilvus>=3.0.0,<4.0.0",
+    "setuptools>=77.0.3,<81",
     "python-dotenv>=1.0.0,<2.0.0",
 ]
 
