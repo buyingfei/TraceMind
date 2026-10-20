@@ -41,7 +41,7 @@ class Settings(BaseSettings):
         description="OpenAI 兼容网关上的 Embedding 模型名",
     )
 
-    # 聊天模型选择：gpt-sol | moondream2 | qwen2.5-7b
+    # 聊天模型选择：gpt-sol | qwen2.5-7b（带图走 PaddleOCR→qwen）
     default_chat_model: str = Field(
         default="gpt-sol",
         description="默认聊天模型 key",
@@ -63,10 +63,6 @@ class Settings(BaseSettings):
     # Ollama（本地 Embedding + 聊天）
     ollama_base_url: str = Field(default="http://127.0.0.1:11434")
     ollama_embedding_model: str = Field(default="batiai/qwen3-embedding:0.6b")
-    ollama_chat_model_moondream: str = Field(
-        default="moondream:latest",
-        description="本地 Moondream2（ollama list 名）",
-    )
     ollama_chat_model_qwen: str = Field(
         default="qwen2.5:7b-instruct-q4_K_M",
         description="本地 Qwen2.5 7B q4_K_M",

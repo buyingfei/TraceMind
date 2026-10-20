@@ -183,7 +183,7 @@ export function useChats() {
             if (data.stage) streamStatus.value = data.message || streamStatus.value
           } else if (event === 'meta') {
             if (data?.message) streamStatus.value = data.message
-            else if (data?.stage === 'vision') streamStatus.value = '正在解析图片…'
+            else if (data?.stage === 'vision') streamStatus.value = '正在 OCR 识别…'
             else if (data?.stage === 'answer' || data?.stage === 'answer_start') {
               streamStatus.value = data.fallback ? 'gpt-sol 生成中…' : '回答生成中…'
             }

@@ -20,3 +20,8 @@ SQLAlchemy>=2.0.0,<3.0.0
 PyMySQL>=1.1.0,<2.0.0
 pytest>=8.0.0,<9.0.0
 python-dotenv>=1.0.0,<2.0.0
+# 图片 OCR（带图对话；paddleocr 与 paddlex 大版本需对齐）
+paddlepaddle>=3.0.0,<4.0.0
+paddleocr>=3.2.0,<3.8.0
+opencv-python-headless>=4.8.0,<5.0.0
+Pillow>=10.0.0,<12.0.0

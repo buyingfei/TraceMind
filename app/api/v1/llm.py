@@ -1,4 +1,4 @@
-"""多模型联调：带图 moondream2→qwen2.5-7b，失败 gpt-sol 兜底。"""
+"""多模型联调：带图 PaddleOCR→qwen2.5-7b，失败 gpt-sol 兜底。"""
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -14,11 +14,11 @@ class ChatRequest(BaseModel):
     system: str | None = Field(default=None, description="可选系统提示词")
     model: str | None = Field(
         default=None,
-        description="仅 use_pipeline=false 且无图时生效：gpt-sol|moondream2|qwen2.5-7b",
+        description="仅 use_pipeline=false 且无图时生效：gpt-sol|qwen2.5-7b",
     )
     images: list[str] = Field(
         default_factory=list,
-        description="图片 data URL 或纯 base64；有图则走 moondream2→qwen2.5-7b",
+        description="图片 data URL 或纯 base64；有图则走 PaddleOCR→qwen2.5-7b",
     )
     use_pipeline: bool = Field(
         default=True,
@@ -40,7 +40,7 @@ class ChatResponse(BaseModel):
 
 @router.get("/llm/models")
 def llm_models() -> dict:
-    """列出可用聊天模型（共 3 个）。"""
+    """列出可用聊天模型。"""
     return {"models": llm_service.list_chat_models()}
 
 
@@ -53,7 +53,7 @@ def llm_config() -> dict:
     return {
         "default_chat_model": settings.default_chat_model,
         "pipeline": {
-            "with_images": "moondream2 -> qwen2.5-7b；两者都失败则 gpt-sol",
+            "with_images": "paddleocr -> qwen2.5-7b；失败则 gpt-sol",
             "without_images": "qwen2.5-7b -> 失败则 gpt-sol",
         },
         "openai": {
@@ -64,9 +64,9 @@ def llm_config() -> dict:
         },
         "ollama": {
             "base_url": settings.ollama_base_url,
-            "moondream2": settings.ollama_chat_model_moondream,
             "qwen2.5-7b": settings.ollama_chat_model_qwen,
         },
+        "ocr": "paddleocr-ch",
         "models": llm_service.list_chat_models(settings=settings),
     }
 

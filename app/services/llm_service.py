@@ -1,6 +1,6 @@
-"""多模型聊天：OpenAI 网关 gpt-sol + 本地 Ollama（moondream2 / qwen2.5-7b）。
+"""多模型聊天：OpenAI 网关 gpt-sol + 本地 Ollama qwen2.5-7b。
 
-带图链路：moondream2 解析图片 → qwen2.5-7b 综合回答；两者都失败则 gpt-sol 兜底。
+带图链路：PaddleOCR 识字 → qwen2.5-7b 综合回答；OCR 与 qwen 都失败则 gpt-sol 兜底。
 """
 
 from __future__ import annotations
@@ -26,11 +26,6 @@ CHAT_MODEL_CATALOG: dict[str, dict[str, str]] = {
         "label": "GPT Sol（网关）",
         "description": "OpenAI 兼容网关 gpt-5.6-sol",
     },
-    "moondream2": {
-        "provider": "ollama",
-        "label": "Moondream2（本地）",
-        "description": "Ollama 视觉小模型，适合看图简述",
-    },
     "qwen2.5-7b": {
         "provider": "ollama",
         "label": "Qwen2.5 7B（本地）",
@@ -44,8 +39,6 @@ _DATA_URL_RE = re.compile(r"^data:(image/[\w.+-]+);base64,(.+)$", re.DOTALL | re
 def _resolve_model_name(key: str, settings: Settings) -> str:
     if key == "gpt-sol":
         return settings.openai_model
-    if key == "moondream2":
-        return settings.ollama_chat_model_moondream
     if key == "qwen2.5-7b":
         return settings.ollama_chat_model_qwen
     raise ValueError(f"未知模型 key: {key}，可选: {', '.join(CHAT_MODEL_CATALOG)}")
@@ -153,51 +146,22 @@ def _chat_text(
     }
 
 
-def describe_images_moondream(
+def describe_images_ocr(
     images: list[str],
     *,
     question_hint: str = "",
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """用本地 moondream 解析图片（Ollama 原生 /api/chat + images）。"""
-    if not images:
-        raise ValueError("images 不能为空")
-    cfg = settings or get_settings()
-    model_name = cfg.ollama_chat_model_moondream
-    b64_list: list[str] = []
-    for img in images:
-        _, raw = _normalize_image_input(img)
-        b64_list.append(raw)
+    """用 PaddleOCR 识别图片文字。"""
+    from app.services import ocr_service
 
-    prompt = "请详细描述图片中的内容，包括文字、界面元素、报错信息。用中文回答。"
-    if question_hint.strip():
-        prompt += f"\n用户问题供参考：{question_hint.strip()}"
-
-    url = cfg.ollama_base_url.rstrip("/") + "/api/chat"
-    payload = {
-        "model": model_name,
-        "stream": False,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-                "images": b64_list,
-            }
-        ],
-    }
-    with httpx.Client(timeout=180.0) as client:
-        response = client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
-    reply = ((data.get("message") or {}).get("content")) or ""
-    if not reply.strip():
-        raise RuntimeError("moondream2 返回空内容")
-    return {
-        "key": "moondream2",
-        "provider": "ollama",
-        "model": model_name,
-        "reply": reply.strip(),
-    }
+    _ = settings  # 预留阈值阈值等配置
+    result = ocr_service.ocr_images(images)
+    hint = (question_hint or "").strip()
+    if hint:
+        # 仅附加到返回结构，不改 OCR 原文主体
+        result = {**result, "question_hint": hint}
+    return result
 
 
 def chat(
@@ -237,9 +201,9 @@ def chat_with_pipeline(
     """带图/纯文本编排。
 
     有图片时：
-      1) moondream2 解析图片
-      2) 解析结果 + 原始问题 → qwen2.5-7b
-      3) moondream 与 qwen 都失败 → gpt-sol 兜底
+      1) PaddleOCR 识别文字
+      2) OCR 文本 + 原始问题 → qwen2.5-7b
+      3) OCR 与 qwen 都失败 → gpt-sol 兜底
 
     无图片时：优先 qwen2.5-7b，失败再 gpt-sol。
     """
@@ -249,23 +213,23 @@ def chat_with_pipeline(
     steps: list[dict[str, Any]] = []
     errors: list[str] = []
 
-    # ---------- 有图：moondream → qwen ----------
+    # ---------- 有图：OCR → qwen ----------
     if image_list:
         image_desc = ""
-        moondream_ok = False
+        ocr_ok = False
         qwen_ok = False
 
         try:
-            vision = describe_images_moondream(
+            vision = describe_images_ocr(
                 image_list,
                 question_hint=user_message,
                 settings=cfg,
             )
             image_desc = vision["reply"]
-            moondream_ok = True
+            ocr_ok = True
             steps.append(
                 {
-                    "step": "vision",
+                    "step": "ocr",
                     "ok": True,
                     "key": vision["key"],
                     "model": vision["model"],
@@ -273,14 +237,15 @@ def chat_with_pipeline(
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("moondream2 调用失败: %s", exc)
-            errors.append(f"moondream2: {exc}")
-            steps.append({"step": "vision", "ok": False, "error": str(exc)})
+            logger.warning("PaddleOCR 调用失败: %s", exc)
+            errors.append(f"paddleocr: {exc}")
+            steps.append({"step": "ocr", "ok": False, "error": str(exc)})
 
         qwen_prompt = (
-            "下面是图片解析结果与用户原始问题，请综合回答用户问题。\n\n"
-            f"【图片解析】\n{image_desc or '（图片解析失败，仅根据文字问题作答）'}\n\n"
-            f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据图片解析作答）'}"
+            "下面是图片 OCR 识别出的文字与用户原始问题，请综合回答用户问题。"
+            "请以 OCR 文字为准，不要编造图中不存在的内容。\n\n"
+            f"【图片OCR文字】\n{image_desc or '（OCR失败，仅根据文字问题作答）'}\n\n"
+            f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据OCR文字总结）'}"
         )
         try:
             qwen = _chat_text(
@@ -304,7 +269,7 @@ def chat_with_pipeline(
                 "provider": qwen["provider"],
                 "model": qwen["model"],
                 "reply": qwen["reply"],
-                "pipeline": "moondream2->qwen2.5-7b",
+                "pipeline": "paddleocr->qwen2.5-7b",
                 "image_description": image_desc,
                 "fallback": False,
                 "steps": steps,
@@ -315,18 +280,18 @@ def chat_with_pipeline(
             errors.append(f"qwen2.5-7b: {exc}")
             steps.append({"step": "answer", "ok": False, "error": str(exc)})
 
-        # 本地两步都失败 → gpt-sol；若仅 qwen 失败但已有图片解析，也用 gpt-sol 带着解析兜底出最终答
-        both_local_failed = (not moondream_ok) and (not qwen_ok)
+        both_local_failed = (not ocr_ok) and (not qwen_ok)
         if both_local_failed:
             fallback_prompt = (
                 f"{user_message.strip() or '请根据上下文回答。'}\n"
-                f"（用户附带了 {len(image_list)} 张图片；本地 moondream2 与 qwen2.5-7b 均不可用。）"
+                f"（用户附带了 {len(image_list)} 张图片；本地 OCR 与 qwen2.5-7b 均不可用。）"
             )
             pipeline_name = "fallback:gpt-sol(both-local-failed)"
         else:
             fallback_prompt = (
-                "下面是图片解析结果与用户原始问题，请综合回答用户问题。\n\n"
-                f"【图片解析】\n{image_desc or '（无）'}\n\n"
+                "下面是图片 OCR 文字与用户原始问题，请综合回答用户问题。"
+                "请以 OCR 文字为准。\n\n"
+                f"【图片OCR文字】\n{image_desc or '（无）'}\n\n"
                 f"【用户问题】\n{user_message.strip() or '（无文字）'}"
             )
             pipeline_name = "fallback:gpt-sol(after-qwen-failed)"
@@ -458,6 +423,7 @@ def iter_chat_text_stream(
         yield {"type": "error", "key": model_key, "message": str(exc)}
 
 
+
 def iter_pipeline_stream(
     user_message: str,
     *,
@@ -466,7 +432,7 @@ def iter_pipeline_stream(
     temperature: float | None = None,
     settings: Settings | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """编排流：vision(非流) → answer(stream) → 必要时 fallback stream。
+    """编排流：OCR(非流) → answer(stream) → 必要时 fallback stream。
 
     事件：meta / delta / done / error
     """
@@ -475,27 +441,27 @@ def iter_pipeline_stream(
     image_list = [x for x in (images or []) if (x or "").strip()]
     errors: list[str] = []
     image_desc = ""
-    moondream_ok = False
+    ocr_ok = False
 
     if image_list:
-        yield {"type": "meta", "stage": "vision", "message": "正在解析图片…"}
+        yield {"type": "meta", "stage": "vision", "message": "正在 OCR 识别图片文字…"}
         try:
-            vision = describe_images_moondream(
+            vision = describe_images_ocr(
                 image_list,
                 question_hint=user_message,
                 settings=cfg,
             )
             image_desc = vision["reply"]
-            moondream_ok = True
+            ocr_ok = True
             yield {
                 "type": "meta",
                 "stage": "vision_done",
-                "key": "moondream2",
+                "key": "paddleocr",
                 "model": vision["model"],
                 "image_description": image_desc,
             }
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"moondream2: {exc}")
+            errors.append(f"paddleocr: {exc}")
             yield {
                 "type": "meta",
                 "stage": "vision_failed",
@@ -503,21 +469,21 @@ def iter_pipeline_stream(
             }
 
         answer_prompt = (
-            "下面是图片解析结果与用户原始问题，请综合回答用户问题。\n\n"
-            f"【图片解析】\n{image_desc or '（图片解析失败，仅根据文字问题作答）'}\n\n"
-            f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据图片解析作答）'}"
+            "下面是图片 OCR 识别出的文字与用户原始问题，请综合回答用户问题。"
+            "请以 OCR 文字为准，不要编造图中不存在的内容。\n\n"
+            f"【图片OCR文字】\n{image_desc or '（OCR失败，仅根据文字问题作答）'}\n\n"
+            f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据OCR文字总结）'}"
         )
     else:
         answer_prompt = user_message
 
-    # 先流式 qwen
     yield {"type": "meta", "stage": "answer", "key": "qwen2.5-7b", "message": "正在生成回答…"}
     qwen_ok = False
     full_reply = ""
     answer_key = "qwen2.5-7b"
     answer_model = _resolve_model_name("qwen2.5-7b", cfg)
     fallback = False
-    pipeline = "qwen2.5-7b" if not image_list else "moondream2->qwen2.5-7b"
+    pipeline = "qwen2.5-7b" if not image_list else "paddleocr->qwen2.5-7b"
 
     for ev in iter_chat_text_stream(
         model_key="qwen2.5-7b",
@@ -543,19 +509,18 @@ def iter_pipeline_stream(
         elif ev["type"] == "error":
             errors.append(f"qwen2.5-7b: {ev.get('message')}")
 
-    # qwen 失败 → gpt-sol 流式兜底（无图且双本地都失败，或无图 qwen 失败）
     if not qwen_ok:
-        both_local_failed = (not moondream_ok) if image_list else True
+        both_local_failed = (not ocr_ok) if image_list else True
         if image_list and both_local_failed:
             fallback_prompt = (
                 f"{user_message.strip() or '请根据上下文回答。'}\n"
-                f"（用户附带了 {len(image_list)} 张图片；本地 moondream2 与 qwen2.5-7b 均不可用。）"
+                f"（用户附带了 {len(image_list)} 张图片；本地 OCR 与 qwen2.5-7b 均不可用。）"
             )
             pipeline = "fallback:gpt-sol(both-local-failed)"
         elif image_list:
             fallback_prompt = (
-                "下面是图片解析结果与用户原始问题，请综合回答用户问题。\n\n"
-                f"【图片解析】\n{image_desc or '（无）'}\n\n"
+                "下面是图片 OCR 文字与用户原始问题，请综合回答用户问题。请以 OCR 文字为准。\n\n"
+                f"【图片OCR文字】\n{image_desc or '（无）'}\n\n"
                 f"【用户问题】\n{user_message.strip() or '（无文字）'}"
             )
             pipeline = "fallback:gpt-sol(after-qwen-failed)"

@@ -24,5 +24,5 @@ npm run dev
 
 - 新对话 / 历史切换
 - `Ctrl+V` 粘贴截图后发送
-- 带图：moondream2 → qwen2.5-7b（失败 gpt-sol 兜底）
+- 带图：PaddleOCR → qwen2.5-7b（失败 gpt-sol 兜底）
 - 回答使用 SSE 流式打字机：`POST /api/v1/chats/{id}/messages/stream`
