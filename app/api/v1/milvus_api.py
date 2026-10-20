@@ -5,7 +5,12 @@ from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.services import milvus_service
-from app.services.code_index_service import index_java_file, load_current_index_context
+from app.services.code_index_service import (
+    get_index_job,
+    index_java_file,
+    load_current_index_context,
+    start_index_repo,
+)
 
 router = APIRouter(prefix="/milvus", tags=["milvus"])
 
@@ -23,6 +28,10 @@ class IndexPreviewRequest(BaseModel):
         default=False,
         description="维度变更时可 true 重建 wt_code_chunks",
     )
+
+
+class IndexRepoRequest(BaseModel):
+    repo: str = Field(..., description="项目名，对应 code_repo.repo_code，如 wintogether-bff")
 
 
 class SearchRequest(BaseModel):
@@ -59,7 +68,7 @@ def ensure_collection(body: EnsureCollectionRequest | None = None) -> dict:
 
 @router.post("/index/preview-file")
 def index_preview_file(body: IndexPreviewRequest | None = None) -> dict:
-    """切块 + Ollama 向量化 + 写入 Milvus（带当前分支/镜像号）。"""
+    """切块 + 先写 MySQL meta + 再写 Milvus（当前 is_current 版本）。"""
     body = body or IndexPreviewRequest()
     try:
         return index_java_file(
@@ -70,6 +79,28 @@ def index_preview_file(body: IndexPreviewRequest | None = None) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"索引失败: {exc}") from exc
+
+
+@router.post("/index/repo")
+def index_repo(body: IndexRepoRequest) -> dict:
+    """全量索引：读取当前分支/镜像号，新建 index_version，后台扫盘向量化。"""
+    try:
+        return start_index_repo(body.repo.strip())
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"提交全量索引失败: {exc}") from exc
+
+
+@router.get("/index/repo/{index_version}")
+def index_repo_status(index_version: str) -> dict:
+    """查询全量索引任务进度。"""
+    job = get_index_job(index_version)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"未找到任务: {index_version}")
+    return job
 
 
 @router.post("/search")

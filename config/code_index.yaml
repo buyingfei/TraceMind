@@ -24,3 +24,17 @@ splitter:
   include_preamble: true
   # 单块最大字符；超出则按行再切（仍保留起止行号）
   max_chars: 4000
+
+# 全库扫描
+scan:
+  include_globs:
+    - "**/src/main/java/**/*.java"
+  exclude_dirs:
+    - target
+    - .git
+    - build
+    - node_modules
+    - .idea
+    - out
+  # 每批写入的 chunk 数（先 MySQL 再 Milvus）
+  batch_size: 16
