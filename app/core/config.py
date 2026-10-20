@@ -48,11 +48,15 @@ class Settings(BaseSettings):
     )
     diagnose_milvus_token: str = Field(default="", description="本地 standalone 一般为空")
     diagnose_milvus_collection: str = Field(default="wt_code_chunks")
-    milvus_embedding_dim: int = Field(default=1536)
+    milvus_embedding_dim: int = Field(default=1024)
     milvus_embedding_provider: str = Field(
-        default="openai",
-        description="openai | local_hash；local_hash 仅用于连通性测试",
+        default="ollama",
+        description="ollama | openai | local_hash",
     )
+
+    # Ollama Embedding（本地）
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434")
+    ollama_embedding_model: str = Field(default="batiai/qwen3-embedding:0.6b")
 
     @property
     def milvus_uri(self) -> str:

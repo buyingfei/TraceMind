@@ -1,7 +1,8 @@
 """文本向量化。
 
-- openai: 走 OpenAI 兼容网关 Embedding 接口
-- local_hash: 本地确定性伪向量，仅用于验证 Milvus 连通（不适合真实检索）
+- ollama: 本地 Ollama Embedding（如 batiai/qwen3-embedding:0.6b）
+- openai: OpenAI 兼容网关 Embedding
+- local_hash: 伪向量，仅测连通
 """
 
 from __future__ import annotations
@@ -10,12 +11,13 @@ import hashlib
 import math
 import struct
 
+import httpx
+
 from app.core.config import Settings, get_settings
 from app.services.llm_service import get_openai_client
 
 
 def _local_hash_embedding(text: str, dim: int) -> list[float]:
-    """用哈希生成固定维度向量，并做 L2 归一化。"""
     values: list[float] = []
     seed = text.encode("utf-8")
     counter = 0
@@ -31,6 +33,34 @@ def _local_hash_embedding(text: str, dim: int) -> list[float]:
     return [v / norm for v in values]
 
 
+def _embed_ollama(texts: list[str], settings: Settings) -> list[list[float]]:
+    url = settings.ollama_base_url.rstrip("/") + "/api/embed"
+    with httpx.Client(timeout=120.0) as client:
+        response = client.post(
+            url,
+            json={
+                "model": settings.ollama_embedding_model,
+                "input": texts,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+    vectors = data.get("embeddings") or []
+    if len(vectors) != len(texts):
+        raise RuntimeError(f"Ollama 返回向量数 {len(vectors)} 与输入 {len(texts)} 不一致")
+    return [list(v) for v in vectors]
+
+
+def _embed_openai(texts: list[str], settings: Settings) -> list[list[float]]:
+    client = get_openai_client()
+    response = client.embeddings.create(
+        model=settings.openai_embedding_model,
+        input=texts,
+    )
+    sorted_data = sorted(response.data, key=lambda item: item.index)
+    return [list(item.embedding) for item in sorted_data]
+
+
 def embed_texts(texts: list[str], *, settings: Settings | None = None) -> list[list[float]]:
     if not texts:
         return []
@@ -38,23 +68,18 @@ def embed_texts(texts: list[str], *, settings: Settings | None = None) -> list[l
     provider = (cfg.milvus_embedding_provider or "openai").lower()
 
     if provider == "local_hash":
-        return [_local_hash_embedding(t, cfg.milvus_embedding_dim) for t in texts]
-
-    if provider != "openai":
+        vectors = [_local_hash_embedding(t, cfg.milvus_embedding_dim) for t in texts]
+    elif provider == "ollama":
+        vectors = _embed_ollama(texts, cfg)
+    elif provider == "openai":
+        vectors = _embed_openai(texts, cfg)
+    else:
         raise ValueError(f"不支持的 embedding provider: {provider}")
 
-    client = get_openai_client()
-    response = client.embeddings.create(
-        model=cfg.openai_embedding_model,
-        input=texts,
-    )
-    # OpenAI 按 index 回传，这里按输入顺序整理
-    sorted_data = sorted(response.data, key=lambda item: item.index)
-    vectors = [list(item.embedding) for item in sorted_data]
     if vectors and len(vectors[0]) != cfg.milvus_embedding_dim:
         raise ValueError(
             f"Embedding 维度 {len(vectors[0])} 与配置 MILVUS_EMBEDDING_DIM="
-            f"{cfg.milvus_embedding_dim} 不一致，请修改 .env"
+            f"{cfg.milvus_embedding_dim} 不一致，请修改 .env 或重建 Milvus collection"
         )
     return vectors
 
