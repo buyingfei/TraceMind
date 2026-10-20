@@ -20,8 +20,7 @@ def main() -> None:
     get_settings.cache_clear()
     get_milvus_client.cache_clear()
 
-    # 维度从 1536 改为 1024，需重建 collection
-    result = index_java_file(recreate_collection=True)
+    result = index_java_file(recreate_collection=False)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     hits = search(

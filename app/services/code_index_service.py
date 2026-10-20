@@ -6,7 +6,9 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db.models import CodeChunkMeta, CodeIndexVersion, CodeRepo
@@ -172,7 +174,42 @@ def index_java_file(
             session.delete(row)
         session.flush()
         session.add_all(meta_rows)
+        session.flush()
+
+        version = session.get(CodeIndexVersion, ctx["index_version_id"])
+        if version is None:
+            raise RuntimeError(f"code_index_version id={ctx['index_version_id']} 不存在")
+
+        total_chunks = session.scalar(
+            select(func.count())
+            .select_from(CodeChunkMeta)
+            .where(CodeChunkMeta.index_version_id == ctx["index_version_id"])
+        ) or 0
+        total_files = session.scalar(
+            select(func.count(func.distinct(CodeChunkMeta.path))).where(
+                CodeChunkMeta.index_version_id == ctx["index_version_id"]
+            )
+        ) or 0
+
+        version.chunk_count = int(total_chunks)
+        version.file_count = int(total_files)
+        version.embedding_model = settings.ollama_embedding_model
+        version.embedding_dim = settings.milvus_embedding_dim
+        version.milvus_collection = settings.milvus_collection
+        version.status = "ready"
+        version.ready_at = datetime.now()
+
         session.commit()
+        db_meta = {
+            "index_version_id": version.id,
+            "meta_upserted": len(meta_rows),
+            "file_count": version.file_count,
+            "chunk_count": version.chunk_count,
+            "status": version.status,
+        }
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 
@@ -181,6 +218,7 @@ def index_java_file(
         "relative_path": rel_norm,
         "chunk_count": len(chunks),
         "upserted": upserted,
+        "db": db_meta,
         "embedding_provider": settings.milvus_embedding_provider,
         "embedding_model": settings.ollama_embedding_model,
         "embedding_dim": settings.milvus_embedding_dim,
