@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
-    # MySQL（对应 Spring spring.datasource.*），库名 diagnose-agent，此处不建表
+    # MySQL（对应 Spring spring.datasource.*），库名 diagnose-agent
     mysql_host: str = Field(default="localhost")
     mysql_port: int = Field(default=3306)
     mysql_user: str = Field(default="root")

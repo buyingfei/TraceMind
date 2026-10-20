@@ -1,4 +1,4 @@
-"""SQLAlchemy MySQL 连接（仅引擎/会话，不自动建表）。"""
+"""SQLAlchemy MySQL 连接（引擎/会话）。"""
 
 from __future__ import annotations
 

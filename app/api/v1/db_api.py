@@ -1,4 +1,4 @@
-"""数据库联调接口（仅连通性，不建表）。"""
+"""数据库联调接口（连通性 / 配置查看）。"""
 
 from fastapi import APIRouter, HTTPException
 
