@@ -1,6 +1,7 @@
 """应用配置。"""
 
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,14 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
+
+    # MySQL（对应 Spring spring.datasource.*），库名 diagnose-agent，此处不建表
+    mysql_host: str = Field(default="localhost")
+    mysql_port: int = Field(default=3306)
+    mysql_user: str = Field(default="root")
+    mysql_password: str = Field(default="123456")
+    mysql_database: str = Field(default="diagnose-agent")
+    mysql_charset: str = Field(default="utf8mb4")
 
     # OpenAI 兼容网关（对应 Spring AI spring.ai.openai.*）
     openai_base_url: str = Field(
@@ -63,6 +72,18 @@ class Settings(BaseSettings):
         if url.endswith("/v1"):
             return url
         return f"{url}/v1"
+
+    @property
+    def database_url(self) -> str:
+        """SQLAlchemy MySQL URL（PyMySQL）。"""
+        user = quote_plus(self.mysql_user)
+        password = quote_plus(self.mysql_password)
+        database = quote_plus(self.mysql_database)
+        return (
+            f"mysql+pymysql://{user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{database}"
+            f"?charset={self.mysql_charset}"
+        )
 
 
 @lru_cache
