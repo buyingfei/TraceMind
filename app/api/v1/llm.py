@@ -1,4 +1,4 @@
-"""多模型联调：gpt-sol / moondream2 / qwen2.5-7b。"""
+"""多模型联调：带图 moondream2→qwen2.5-7b，失败 gpt-sol 兜底。"""
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -10,11 +10,19 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., description="用户消息")
+    message: str = Field(default="", description="用户文字问题")
     system: str | None = Field(default=None, description="可选系统提示词")
     model: str | None = Field(
         default=None,
-        description="模型 key：gpt-sol | moondream2 | qwen2.5-7b；不传用默认",
+        description="仅 use_pipeline=false 且无图时生效：gpt-sol|moondream2|qwen2.5-7b",
+    )
+    images: list[str] = Field(
+        default_factory=list,
+        description="图片 data URL 或纯 base64；有图则走 moondream2→qwen2.5-7b",
+    )
+    use_pipeline: bool = Field(
+        default=True,
+        description="默认编排；false 且无图时按 model 单模型调用",
     )
 
 
@@ -23,6 +31,11 @@ class ChatResponse(BaseModel):
     provider: str
     model: str
     reply: str
+    pipeline: str | None = None
+    image_description: str | None = None
+    fallback: bool = False
+    steps: list[dict] | None = None
+    errors: list[str] | None = None
 
 
 @router.get("/llm/models")
@@ -39,6 +52,10 @@ def llm_config() -> dict:
     masked = f"{key[:7]}...{key[-4:]}" if len(key) > 12 else "(empty)"
     return {
         "default_chat_model": settings.default_chat_model,
+        "pipeline": {
+            "with_images": "moondream2 -> qwen2.5-7b；两者都失败则 gpt-sol",
+            "without_images": "qwen2.5-7b -> 失败则 gpt-sol",
+        },
         "openai": {
             "base_url": settings.normalized_openai_base_url(),
             "model": settings.openai_model,
@@ -56,14 +73,36 @@ def llm_config() -> dict:
 
 @router.post("/llm/chat", response_model=ChatResponse)
 def llm_chat(body: ChatRequest) -> ChatResponse:
+    if not (body.message or "").strip() and not body.images:
+        raise HTTPException(status_code=400, detail="message 与 images 不能同时为空")
+
+    system = body.system or "你是 diagnose-agent 助手，用简洁中文回答。"
     try:
-        result = llm_service.chat(
-            body.message,
-            system_message=body.system or "你是 diagnose-agent 助手，用简洁中文回答。",
-            model_key=body.model,
-        )
+        if body.images or body.use_pipeline:
+            result = llm_service.chat_with_pipeline(
+                body.message,
+                images=body.images,
+                system_message=system,
+            )
+        else:
+            result = llm_service.chat(
+                body.message,
+                system_message=system,
+                model_key=body.model,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}") from exc
-    return ChatResponse(**result)
+
+    return ChatResponse(
+        key=result.get("key", ""),
+        provider=result.get("provider", ""),
+        model=result.get("model", ""),
+        reply=result.get("reply", ""),
+        pipeline=result.get("pipeline"),
+        image_description=result.get("image_description") or None,
+        fallback=bool(result.get("fallback")),
+        steps=result.get("steps"),
+        errors=result.get("errors") or None,
+    )
