@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         description="Docker Milvus 地址，例如 http://127.0.0.1:19530",
     )
     diagnose_milvus_token: str = Field(default="", description="本地 standalone 一般为空")
-    diagnose_milvus_collection: str = Field(default="diagnose_code_chunks")
+    diagnose_milvus_collection: str = Field(default="wt_code_chunks")
     milvus_embedding_dim: int = Field(default=1536)
     milvus_embedding_provider: str = Field(
         default="openai",

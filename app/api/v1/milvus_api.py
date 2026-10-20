@@ -39,6 +39,7 @@ def milvus_health() -> dict:
 
 @router.post("/ensure-collection")
 def ensure_collection(body: EnsureCollectionRequest | None = None) -> dict:
+    """按 wt_code_chunks 模型创建 Collection（已存在则跳过）。"""
     body = body or EnsureCollectionRequest()
     try:
         name = milvus_service.ensure_collection(drop_if_exists=body.drop_if_exists)
@@ -47,6 +48,7 @@ def ensure_collection(body: EnsureCollectionRequest | None = None) -> dict:
     settings = get_settings()
     return {
         "collection": name,
+        "model": "wt_code_chunks",
         "embedding_dim": settings.milvus_embedding_dim,
         "embedding_provider": settings.milvus_embedding_provider,
     }
