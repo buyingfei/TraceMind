@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -82,4 +83,81 @@ class CodeChunkMeta(Base):
     end_line: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="", comment="text md5")
     char_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+class ChatConversation(Base):
+    """对话会话（无用户维度，本机单租户）。"""
+
+    __tablename__ = "chat_conversation"
+    __table_args__ = (Index("idx_chat_conv_status_last", "status", "last_message_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="新对话", comment="会话标题")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="active", comment="active/archived/deleted"
+    )
+    last_message_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最后消息时间，列表排序"
+    )
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="消息条数冗余")
+    context_repo: Mapped[str] = mapped_column(String(64), nullable=False, default="", comment="可选绑定仓库")
+    context_image_tag: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="", comment="可选绑定镜像号"
+    )
+    context_index_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", comment="可选绑定索引版本"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ChatMessage(Base):
+    """对话消息。"""
+
+    __tablename__ = "chat_message"
+    __table_args__ = (
+        Index("idx_chat_msg_conv_seq", "conversation_id", "seq"),
+        UniqueConstraint("conversation_id", "client_msg_id", name="uk_chat_msg_conv_client"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, index=True, comment="chat_conversation.id"
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False, comment="user/assistant/system")
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="文本内容")
+    content_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="text", comment="text/mixed"
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="会话内序号")
+    client_msg_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", comment="前端幂等键，勿长期用空串"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="normal", comment="normal/failed/deleted"
+    )
+    error_message: Mapped[str] = mapped_column(String(512), nullable=False, default="", comment="失败说明")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+class ChatMessageAsset(Base):
+    """消息本地附件元数据（图片相对 data/chat_uploads）。"""
+
+    __tablename__ = "chat_message_asset"
+    __table_args__ = (Index("idx_chat_asset_msg_sort", "message_id", "sort_no"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True, comment="chat_message.id")
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False, default="image", comment="附件类型")
+    relative_path: Mapped[str] = mapped_column(
+        String(512), nullable=False, comment="相对 data/chat_uploads 路径"
+    )
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="", comment="MIME")
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    width: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    height: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="同消息多图顺序")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
