@@ -32,6 +32,10 @@ class IndexPreviewRequest(BaseModel):
 
 class IndexRepoRequest(BaseModel):
     repo: str = Field(..., description="项目名，对应 code_repo.repo_code，如 wintogether-bff")
+    index_version: str | None = Field(
+        default=None,
+        description="传入则续跑该版本（跳过已入库文件并修复缺向量）；不传则新建全量",
+    )
 
 
 class SearchRequest(BaseModel):
@@ -83,9 +87,12 @@ def index_preview_file(body: IndexPreviewRequest | None = None) -> dict:
 
 @router.post("/index/repo")
 def index_repo(body: IndexRepoRequest) -> dict:
-    """全量索引：读取当前分支/镜像号，新建 index_version，后台扫盘向量化。"""
+    """全量或续跑索引。传 index_version 则从断点续跑，否则新建版本全量。"""
     try:
-        return start_index_repo(body.repo.strip())
+        return start_index_repo(
+            body.repo.strip(),
+            index_version=(body.index_version.strip() if body.index_version else None),
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:

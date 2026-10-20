@@ -417,10 +417,44 @@ def _switch_is_current(repo_id: int, new_version_id: int) -> None:
         session.close()
 
 
+def _meta_paths_and_ids(index_version_id: int) -> tuple[set[str], dict[str, list[str]]]:
+    """返回已有 meta 的 path 集合，以及 path -> milvus_id 列表。"""
+    factory = get_session_factory()
+    session = factory()
+    try:
+        rows = session.scalars(
+            select(CodeChunkMeta).where(CodeChunkMeta.index_version_id == index_version_id)
+        ).all()
+        path_ids: dict[str, list[str]] = {}
+        for row in rows:
+            path_ids.setdefault(row.path, []).append(row.milvus_id)
+        return set(path_ids.keys()), path_ids
+    finally:
+        session.close()
+
+
+def _paths_missing_in_milvus(
+    path_ids: dict[str, list[str]],
+    *,
+    settings: Any,
+) -> set[str]:
+    """meta 有但 Milvus 缺向量的 path。"""
+    all_ids: list[str] = []
+    for ids in path_ids.values():
+        all_ids.extend(ids)
+    existing = milvus_service.get_existing_ids(all_ids, settings=settings)
+    missing_paths: set[str] = set()
+    for path, ids in path_ids.items():
+        if not ids or any(mid not in existing for mid in ids):
+            missing_paths.add(path)
+    return missing_paths
+
+
 def _run_index_repo(job: dict[str, Any]) -> None:
     repo_code = job["repo"]
     index_version = job["index_version"]
     index_version_id = job["index_version_id"]
+    mode = job.get("mode") or "full"
     local_root = Path(job["local_root"])
     cfg = load_code_index_config()
     scan_cfg = cfg.get("scan") or {}
@@ -441,30 +475,65 @@ def _run_index_repo(job: dict[str, Any]) -> None:
         milvus_service.ensure_collection(settings=settings, drop_if_exists=False)
         files = _scan_java_files(local_root, scan_cfg)
         total_files = len(files)
+
+        done_paths, path_ids = _meta_paths_and_ids(index_version_id)
+        repair_paths: set[str] = set()
+        if mode == "resume" and path_ids:
+            _set_job(
+                index_version,
+                mode=mode,
+                message="续跑：检查 MySQL/Milvus 一致性…",
+            )
+            repair_paths = _paths_missing_in_milvus(path_ids, settings=settings)
+
+        skip_paths = done_paths - repair_paths
+        repair_files = [
+            p
+            for p in files
+            if p.relative_to(local_root).as_posix() in repair_paths
+        ]
+        new_files = [
+            p
+            for p in files
+            if p.relative_to(local_root).as_posix() not in done_paths
+        ]
+        remaining_count = len(repair_files) + len(new_files)
+
         _set_job(
             index_version,
             status="building",
+            mode=mode,
             total_files=total_files,
+            skipped_files=len(skip_paths),
+            remaining_files=remaining_count,
+            repaired_files=0,
             processed_files=0,
             chunk_count=0,
             failed_files=[],
-            message=f"扫描到 {total_files} 个 Java 文件",
+            message=(
+                f"扫描 {total_files}；跳过 {len(skip_paths)}；"
+                f"修复 {len(repair_files)}；新增 {len(new_files)}"
+            ),
         )
 
         pending_milvus: list[dict[str, Any]] = []
         pending_meta: list[CodeChunkMeta] = []
         processed = 0
+        repaired = 0
         chunk_total = 0
         failed: list[dict[str, str]] = []
 
-        def flush_batch() -> None:
+        def flush_batch(*, milvus_only: bool) -> None:
             nonlocal pending_milvus, pending_meta, chunk_total
             if not pending_milvus:
                 return
-            n = _persist_batch_mysql_then_milvus(
-                milvus_rows=pending_milvus,
-                meta_rows=pending_meta,
-            )
+            if milvus_only:
+                n = milvus_service.upsert_chunks(pending_milvus, settings=settings)
+            else:
+                n = _persist_batch_mysql_then_milvus(
+                    milvus_rows=pending_milvus,
+                    meta_rows=pending_meta,
+                )
             chunk_total += n
             pending_milvus = []
             pending_meta = []
@@ -472,70 +541,102 @@ def _run_index_repo(job: dict[str, Any]) -> None:
             _set_job(
                 index_version,
                 processed_files=processed,
+                repaired_files=repaired,
                 chunk_count=chunk_total,
                 failed_files=failed[-20:],
-                message=f"已处理 {processed}/{total_files} 文件，chunk={chunk_total}",
+                message=(
+                    f"进度 {processed}/{remaining_count}，"
+                    f"写入chunk={chunk_total}，修复文件={repaired}"
+                ),
             )
 
-        for file_path in files:
-            rel_norm = file_path.relative_to(local_root).as_posix()
-            try:
-                chunks = split_java_file(
-                    file_path,
-                    node_types=splitter_cfg.get("node_types"),
-                    include_preamble=bool(splitter_cfg.get("include_preamble", True)),
-                    max_chars=int(splitter_cfg.get("max_chars", 4000)),
-                )
-                milvus_rows, meta_rows = _build_chunk_rows(
-                    chunks=chunks, ctx=ctx, rel_norm=rel_norm
-                )
-                pending_milvus.extend(milvus_rows)
-                pending_meta.extend(meta_rows)
-                if len(pending_milvus) >= batch_size:
-                    flush_batch()
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("索引文件失败: %s", rel_norm)
-                failed.append({"path": rel_norm, "error": str(exc)[:300]})
-            finally:
-                processed += 1
-                if processed % 20 == 0 or processed == total_files:
-                    _set_job(
-                        index_version,
-                        processed_files=processed,
-                        total_files=total_files,
-                        chunk_count=chunk_total + len(pending_milvus),
-                        failed_files=failed[-20:],
-                        message=f"已处理 {processed}/{total_files} 文件",
+        def index_file_list(
+            file_list: list[Path],
+            *,
+            milvus_only: bool,
+        ) -> None:
+            nonlocal processed, repaired, pending_milvus, pending_meta
+            for file_path in file_list:
+                rel_norm = file_path.relative_to(local_root).as_posix()
+                try:
+                    chunks = split_java_file(
+                        file_path,
+                        node_types=splitter_cfg.get("node_types"),
+                        include_preamble=bool(splitter_cfg.get("include_preamble", True)),
+                        max_chars=int(splitter_cfg.get("max_chars", 4000)),
                     )
+                    milvus_rows, meta_rows = _build_chunk_rows(
+                        chunks=chunks, ctx=ctx, rel_norm=rel_norm
+                    )
+                    pending_milvus.extend(milvus_rows)
+                    if not milvus_only:
+                        pending_meta.extend(meta_rows)
+                    if milvus_only:
+                        repaired += 1
+                    if len(pending_milvus) >= batch_size:
+                        flush_batch(milvus_only=milvus_only)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("索引文件失败: %s", rel_norm)
+                    failed.append({"path": rel_norm, "error": str(exc)[:300]})
+                finally:
+                    processed += 1
+                    if processed % 20 == 0 or processed == remaining_count:
+                        _set_job(
+                            index_version,
+                            processed_files=processed,
+                            remaining_files=remaining_count,
+                            skipped_files=len(skip_paths),
+                            repaired_files=repaired,
+                            total_files=total_files,
+                            chunk_count=chunk_total + len(pending_milvus),
+                            failed_files=failed[-20:],
+                            message=(
+                                f"进度 {processed}/{remaining_count}；"
+                                f"跳过 {len(skip_paths)}；修复 {repaired}"
+                            ),
+                        )
+            flush_batch(milvus_only=milvus_only)
 
-        flush_batch()
+        # 先补齐「有 meta 无向量」，再索引全新文件
+        index_file_list(repair_files, milvus_only=True)
+        index_file_list(new_files, milvus_only=False)
+
         counts = _refresh_version_counts(index_version_id, status="building")
         _switch_is_current(job["repo_id"], index_version_id)
         _set_job(
             index_version,
             status="ready",
+            mode=mode,
             processed_files=processed,
             total_files=total_files,
+            skipped_files=len(skip_paths),
+            remaining_files=remaining_count,
+            repaired_files=repaired,
             chunk_count=counts["chunk_count"],
             file_count=counts["file_count"],
             failed_files=failed[-50:],
             failed_count=len(failed),
-            message="全量索引完成，已切换 is_current",
+            message="索引完成，已切换 is_current",
         )
         logger.info(
-            "全量索引完成 repo=%s index_version=%s files=%s chunks=%s failed=%s",
+            "索引完成 mode=%s repo=%s index_version=%s files=%s chunks=%s "
+            "skipped=%s repaired=%s failed=%s",
+            mode,
             repo_code,
             index_version,
             counts["file_count"],
             counts["chunk_count"],
+            len(skip_paths),
+            repaired,
             len(failed),
         )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("全量索引失败 repo=%s", repo_code)
+        logger.exception("索引失败 repo=%s mode=%s", repo_code, mode)
         _mark_version_failed(index_version_id, str(exc))
         _set_job(
             index_version,
             status="failed",
+            mode=mode,
             message=str(exc)[:500],
         )
     finally:
@@ -543,99 +644,175 @@ def _run_index_repo(job: dict[str, Any]) -> None:
             _running_repos.discard(repo_code)
 
 
-def start_index_repo(repo_code: str) -> dict[str, Any]:
-    """创建新 index_version 并后台全量索引；立即返回任务信息。"""
+def start_index_repo(
+    repo_code: str,
+    index_version: str | None = None,
+) -> dict[str, Any]:
+    """全量或续跑：不传 index_version 新建；传入则在该版本上跳过已完成文件继续跑。"""
     with _job_lock:
         if repo_code in _running_repos:
             raise RuntimeError(f"项目 {repo_code} 已有全量索引任务在执行")
-        # 先占位，避免并发双开；失败时在 finally 释放
         _running_repos.add(repo_code)
 
     settings = get_settings()
     factory = get_session_factory()
     session = factory()
     job: dict[str, Any] | None = None
+    mode = "resume" if index_version else "full"
     try:
         repo = session.scalar(select(CodeRepo).where(CodeRepo.repo_code == repo_code))
         if repo is None:
             raise RuntimeError(f"MySQL 中不存在 code_repo: {repo_code}")
 
-        building = session.scalar(
-            select(CodeIndexVersion).where(
-                CodeIndexVersion.repo_id == repo.id,
-                CodeIndexVersion.status == "building",
-            )
-        )
-        if building is not None:
-            raise RuntimeError(
-                f"项目 {repo_code} 已有 building 版本: {building.index_version}"
-            )
-
-        current = session.scalar(
-            select(CodeIndexVersion).where(
-                CodeIndexVersion.repo_id == repo.id,
-                CodeIndexVersion.is_current == 1,
-            )
-        )
-        if current is None:
-            raise RuntimeError(f"MySQL 中不存在 is_current=1 的版本（repo={repo_code}）")
-
         local_root = Path(repo.local_root)
         if not local_root.exists():
             raise FileNotFoundError(f"local_root 不存在: {local_root}")
 
-        git_commit = _read_git_commit(local_root) or current.git_commit
-        index_version = _new_index_version_code()
-        exists = session.scalar(
-            select(CodeIndexVersion).where(
-                CodeIndexVersion.repo_id == repo.id,
-                CodeIndexVersion.index_version == index_version,
+        if mode == "resume":
+            assert index_version is not None
+            version = session.scalar(
+                select(CodeIndexVersion).where(
+                    CodeIndexVersion.repo_id == repo.id,
+                    CodeIndexVersion.index_version == index_version,
+                )
             )
-        )
-        if exists is not None:
-            index_version = f"{index_version}_{_md5(index_version)[:6]}"
+            if version is None:
+                raise RuntimeError(
+                    f"未找到 index_version={index_version}（repo={repo_code}）"
+                )
+            if version.status == "ready":
+                raise RuntimeError(
+                    f"{index_version} 已是 ready，不能续跑；全量请不要传 index_version"
+                )
+            if version.status not in ("building", "failed"):
+                raise RuntimeError(
+                    f"{index_version} 状态={version.status}，仅 building/failed 可续跑"
+                )
 
-        version = CodeIndexVersion(
-            repo_id=repo.id,
-            branch=current.branch,
-            image_tag=current.image_tag,
-            git_commit=git_commit,
-            index_version=index_version,
-            embedding_model=settings.ollama_embedding_model,
-            embedding_dim=settings.milvus_embedding_dim,
-            milvus_collection=settings.milvus_collection,
-            status="building",
-            file_count=0,
-            chunk_count=0,
-            is_current=0,
-            remark="full repo index",
-            started_at=datetime.now(),
-        )
-        session.add(version)
-        session.commit()
-        session.refresh(version)
+            other_building = session.scalar(
+                select(CodeIndexVersion).where(
+                    CodeIndexVersion.repo_id == repo.id,
+                    CodeIndexVersion.status == "building",
+                    CodeIndexVersion.id != version.id,
+                )
+            )
+            if other_building is not None:
+                raise RuntimeError(
+                    f"项目 {repo_code} 另有 building 版本: {other_building.index_version}"
+                )
 
-        job = {
-            "repo": repo.repo_code,
-            "repo_id": repo.id,
-            "local_root": repo.local_root,
-            "branch": version.branch,
-            "image_tag": version.image_tag,
-            "git_commit": version.git_commit,
-            "index_version": version.index_version,
-            "index_version_id": version.id,
-            "status": "building",
-            "total_files": 0,
-            "processed_files": 0,
-            "chunk_count": 0,
-            "file_count": 0,
-            "failed_files": [],
-            "failed_count": 0,
-            "message": "任务已创建，后台执行中",
-            "started_at": datetime.now().isoformat(timespec="seconds"),
-        }
+            version.status = "building"
+            version.remark = f"resume {datetime.now().isoformat(timespec='seconds')}"
+            if version.started_at is None:
+                version.started_at = datetime.now()
+            session.commit()
+            session.refresh(version)
+
+            done_paths, _ = _meta_paths_and_ids(version.id)
+            job = {
+                "repo": repo.repo_code,
+                "repo_id": repo.id,
+                "local_root": repo.local_root,
+                "branch": version.branch,
+                "image_tag": version.image_tag,
+                "git_commit": version.git_commit,
+                "index_version": version.index_version,
+                "index_version_id": version.id,
+                "mode": "resume",
+                "status": "building",
+                "skipped_files": len(done_paths),
+                "total_files": 0,
+                "remaining_files": 0,
+                "repaired_files": 0,
+                "processed_files": 0,
+                "chunk_count": version.chunk_count,
+                "file_count": version.file_count,
+                "failed_files": [],
+                "failed_count": 0,
+                "message": f"续跑任务已创建，已有 meta 文件约 {len(done_paths)} 个",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        else:
+            building = session.scalar(
+                select(CodeIndexVersion).where(
+                    CodeIndexVersion.repo_id == repo.id,
+                    CodeIndexVersion.status == "building",
+                )
+            )
+            if building is not None:
+                raise RuntimeError(
+                    f"项目 {repo_code} 已有 building 版本: {building.index_version}；"
+                    f"续跑请传 index_version"
+                )
+
+            current = session.scalar(
+                select(CodeIndexVersion).where(
+                    CodeIndexVersion.repo_id == repo.id,
+                    CodeIndexVersion.is_current == 1,
+                )
+            )
+            if current is None:
+                raise RuntimeError(
+                    f"MySQL 中不存在 is_current=1 的版本（repo={repo_code}）"
+                )
+
+            git_commit = _read_git_commit(local_root) or current.git_commit
+            new_code = _new_index_version_code()
+            exists = session.scalar(
+                select(CodeIndexVersion).where(
+                    CodeIndexVersion.repo_id == repo.id,
+                    CodeIndexVersion.index_version == new_code,
+                )
+            )
+            if exists is not None:
+                new_code = f"{new_code}_{_md5(new_code)[:6]}"
+
+            version = CodeIndexVersion(
+                repo_id=repo.id,
+                branch=current.branch,
+                image_tag=current.image_tag,
+                git_commit=git_commit,
+                index_version=new_code,
+                embedding_model=settings.ollama_embedding_model,
+                embedding_dim=settings.milvus_embedding_dim,
+                milvus_collection=settings.milvus_collection,
+                status="building",
+                file_count=0,
+                chunk_count=0,
+                is_current=0,
+                remark="full repo index",
+                started_at=datetime.now(),
+            )
+            session.add(version)
+            session.commit()
+            session.refresh(version)
+
+            job = {
+                "repo": repo.repo_code,
+                "repo_id": repo.id,
+                "local_root": repo.local_root,
+                "branch": version.branch,
+                "image_tag": version.image_tag,
+                "git_commit": version.git_commit,
+                "index_version": version.index_version,
+                "index_version_id": version.id,
+                "mode": "full",
+                "status": "building",
+                "skipped_files": 0,
+                "total_files": 0,
+                "remaining_files": 0,
+                "repaired_files": 0,
+                "processed_files": 0,
+                "chunk_count": 0,
+                "file_count": 0,
+                "failed_files": [],
+                "failed_count": 0,
+                "message": "全量任务已创建，后台执行中",
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
         with _job_lock:
-            _jobs[index_version] = job
+            _jobs[job["index_version"]] = job
     except Exception:
         session.rollback()
         with _job_lock:
@@ -656,10 +833,13 @@ def start_index_repo(repo_code: str) -> dict[str, Any]:
     return {
         "job_id": job["index_version"],
         "repo": repo_code,
+        "mode": job["mode"],
         "branch": job["branch"],
         "image_tag": job["image_tag"],
         "index_version": job["index_version"],
         "index_version_id": job["index_version_id"],
         "git_commit": job["git_commit"],
+        "skipped_files": job.get("skipped_files", 0),
         "status": "building",
     }
+

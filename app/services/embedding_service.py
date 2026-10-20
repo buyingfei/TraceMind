@@ -35,7 +35,7 @@ def _local_hash_embedding(text: str, dim: int) -> list[float]:
 
 def _embed_ollama(texts: list[str], settings: Settings) -> list[list[float]]:
     url = settings.ollama_base_url.rstrip("/") + "/api/embed"
-    with httpx.Client(timeout=120.0) as client:
+    with httpx.Client(timeout=300.0) as client:
         response = client.post(
             url,
             json={

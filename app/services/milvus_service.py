@@ -82,6 +82,32 @@ def _clip(value: str, max_len: int) -> str:
     return value[: max_len - 3] + "..."
 
 
+def get_existing_ids(
+    ids: list[str],
+    *,
+    settings: Settings | None = None,
+    batch_size: int = 100,
+) -> set[str]:
+    """查询哪些 id 已存在于当前 collection。"""
+    if not ids:
+        return set()
+    cfg = settings or get_settings()
+    client = get_milvus_client()
+    if not client.has_collection(cfg.milvus_collection):
+        return set()
+
+    found: set[str] = set()
+    step = max(1, batch_size)
+    for i in range(0, len(ids), step):
+        chunk = [str(x) for x in ids[i : i + step]]
+        rows = client.get(collection_name=cfg.milvus_collection, ids=chunk) or []
+        for row in rows:
+            rid = row.get("id")
+            if rid is not None:
+                found.add(str(rid))
+    return found
+
+
 def upsert_chunks(
     chunks: list[dict[str, Any]],
     *,
