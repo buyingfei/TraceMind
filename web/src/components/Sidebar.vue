@@ -1,7 +1,7 @@
 <script setup>
 defineProps({
   conversations: { type: Array, required: true },
-  activeId: { type: String, default: null },
+  activeId: { type: [Number, String], default: null },
 })
 
 const emit = defineEmits(['select', 'create'])
@@ -43,7 +43,7 @@ function formatTime(ts) {
       >
         <div class="item-title">{{ item.title }}</div>
         <div class="item-meta">
-          <span>{{ item.messages.length }} 条</span>
+          <span>{{ item.messageCount ?? item.messages?.length ?? 0 }} 条</span>
           <span>{{ formatTime(item.updatedAt) }}</span>
         </div>
       </button>

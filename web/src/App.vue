@@ -7,6 +7,9 @@ const {
   conversations,
   activeId,
   activeChat,
+  sending,
+  error,
+  streamStatus,
   selectChat,
   createChat,
   sendMessage,
@@ -23,6 +26,9 @@ const {
     />
     <ChatPanel
       :chat="activeChat"
+      :sending="sending"
+      :error="error"
+      :stream-status="streamStatus"
       @send="sendMessage"
       @create="createChat"
     />

@@ -72,6 +72,9 @@ class Settings(BaseSettings):
         description="本地 Qwen2.5 7B q4_K_M",
     )
 
+    # 对话图片本地目录（相对项目根）
+    chat_upload_dir: str = Field(default="data/chat_uploads")
+
     @property
     def milvus_uri(self) -> str:
         return self.diagnose_milvus_uri

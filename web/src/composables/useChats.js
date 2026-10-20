@@ -1,67 +1,47 @@
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import {
+  clientMsgId,
+  createConversation as apiCreate,
+  getMessages,
+  listConversations,
+  sendMessageStream,
+  uploadDataUrl,
+} from '../api/chat'
 
-function uid(prefix = 'id') {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+function toUiConversation(row) {
+  return {
+    id: row.id,
+    title: row.title || '新对话',
+    updatedAt: row.last_message_at || row.updated_at || row.created_at,
+    messageCount: row.message_count || 0,
+    messages: [],
+    loaded: false,
+  }
 }
 
-function nowLabel() {
-  return new Date().toLocaleString('zh-CN', {
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+function toUiMessage(msg) {
+  return {
+    id: msg.id,
+    role: msg.role,
+    content: msg.content || '',
+    images: (msg.images || []).map((img) => ({
+      id: img.id,
+      url: img.url,
+      name: img.relative_path,
+    })),
+    createdAt: msg.created_at,
+    status: msg.status,
+    streaming: false,
+  }
 }
 
-const seed = [
-  {
-    id: 'c_demo_1',
-    title: '门店自动入库失败排查',
-    updatedAt: Date.now() - 3600_000,
-    messages: [
-      {
-        id: 'm1',
-        role: 'user',
-        content: '连锁店自动入库偶发失败，帮我从代码侧排查方向。',
-        images: [],
-        createdAt: Date.now() - 3600_000,
-      },
-      {
-        id: 'm2',
-        role: 'assistant',
-        content:
-          '可以从入库触发链路、幂等校验、库存锁定与回滚日志三条线并行看。先确认失败时的 image_tag / 门店编码，我再帮你缩小到具体模块。',
-        images: [],
-        createdAt: Date.now() - 3500_000,
-      },
-    ],
-  },
-  {
-    id: 'c_demo_2',
-    title: 'Wintogether 启动类说明',
-    updatedAt: Date.now() - 86400_000,
-    messages: [
-      {
-        id: 'm3',
-        role: 'user',
-        content: 'WintogetherWebOpApplication 做了什么？',
-        images: [],
-        createdAt: Date.now() - 86400_000,
-      },
-      {
-        id: 'm4',
-        role: 'assistant',
-        content:
-          '它是 web-op 模块的 Spring Boot 启动入口，开启了异步、缓存、Feign 与 MapperScan，并指定了多包扫描范围。',
-        images: [],
-        createdAt: Date.now() - 86300_000,
-      },
-    ],
-  },
-]
-
-const conversations = ref(structuredClone(seed))
-const activeId = ref(conversations.value[0]?.id ?? null)
+const conversations = ref([])
+const activeId = ref(null)
+const loadingList = ref(false)
+const loadingMessages = ref(false)
+const sending = ref(false)
+const error = ref('')
+const streamStatus = ref('')
 
 export function useChats() {
   const activeChat = computed(
@@ -69,85 +49,219 @@ export function useChats() {
   )
 
   const sortedConversations = computed(() =>
-    [...conversations.value].sort((a, b) => b.updatedAt - a.updatedAt),
+    [...conversations.value].sort((a, b) => {
+      const ta = new Date(a.updatedAt || 0).getTime()
+      const tb = new Date(b.updatedAt || 0).getTime()
+      return tb - ta
+    }),
   )
 
-  function selectChat(id) {
+  async function refreshList() {
+    loadingList.value = true
+    error.value = ''
+    try {
+      const data = await listConversations()
+      const items = (data.items || []).map(toUiConversation)
+      const prev = new Map(conversations.value.map((c) => [c.id, c]))
+      conversations.value = items.map((item) => {
+        const old = prev.get(item.id)
+        if (old?.loaded) {
+          return { ...item, messages: old.messages, loaded: true }
+        }
+        return item
+      })
+      if (activeId.value == null && conversations.value.length) {
+        await selectChat(conversations.value[0].id)
+      } else if (
+        activeId.value != null &&
+        !conversations.value.some((c) => c.id === activeId.value)
+      ) {
+        activeId.value = conversations.value[0]?.id ?? null
+        if (activeId.value != null) await selectChat(activeId.value)
+      }
+    } catch (e) {
+      error.value = e.message || String(e)
+    } finally {
+      loadingList.value = false
+    }
+  }
+
+  async function selectChat(id) {
     activeId.value = id
-  }
-
-  function createChat() {
-    const chat = {
-      id: uid('c'),
-      title: '新对话',
-      updatedAt: Date.now(),
-      messages: [],
+    const chat = conversations.value.find((c) => c.id === id)
+    if (!chat || chat.loaded) return
+    loadingMessages.value = true
+    error.value = ''
+    try {
+      const data = await getMessages(id)
+      chat.messages = (data.items || []).map(toUiMessage)
+      chat.loaded = true
+    } catch (e) {
+      error.value = e.message || String(e)
+    } finally {
+      loadingMessages.value = false
     }
-    conversations.value.unshift(chat)
-    activeId.value = chat.id
-    return chat
   }
 
-  function renameFromFirstMessage(chat, text) {
-    if (chat.title !== '新对话') return
-    const title = text.trim().replace(/\s+/g, ' ').slice(0, 18)
-    if (title) chat.title = title
-  }
-
-  function sendMessage({ text, images }) {
-    let chat = activeChat.value
-    if (!chat) {
-      chat = createChat()
+  async function createChat() {
+    error.value = ''
+    try {
+      const row = await apiCreate('新对话')
+      const chat = toUiConversation(row)
+      chat.loaded = true
+      chat.messages = []
+      conversations.value.unshift(chat)
+      activeId.value = chat.id
+      return chat
+    } catch (e) {
+      error.value = e.message || String(e)
+      throw e
     }
+  }
 
+  async function sendMessage({ text, images }) {
     const content = (text || '').trim()
-    if (!content && (!images || images.length === 0)) return
+    if (!content && (!images || !images.length)) return
+    if (sending.value) return
 
-    chat.messages.push({
-      id: uid('m'),
-      role: 'user',
-      content,
-      images: images || [],
-      createdAt: Date.now(),
-    })
-    renameFromFirstMessage(chat, content || '图片消息')
-    chat.updatedAt = Date.now()
+    sending.value = true
+    error.value = ''
+    streamStatus.value = '上传中…'
+    const tempId = `tmp_${Date.now()}`
 
-    // 样式阶段：模拟助手回复
-    window.setTimeout(() => {
+    try {
+      let chat = activeChat.value
+      if (!chat) {
+        chat = await createChat()
+      }
+
+      const relativePaths = []
+      for (const img of images || []) {
+        const dataUrl = img.url || img.dataUrl
+        if (!dataUrl) continue
+        const uploaded = await uploadDataUrl(dataUrl, chat.id)
+        relativePaths.push(uploaded.relative_path)
+      }
+
       const target = conversations.value.find((c) => c.id === chat.id)
       if (!target) return
-      const imgHint = images?.length ? `（已收到 ${images.length} 张图片）` : ''
-      target.messages.push({
-        id: uid('m'),
-        role: 'assistant',
-        content: content
-          ? `已收到：${content}${imgHint}\n\n（当前为界面预览，尚未接入诊断 Agent）`
-          : `已收到图片${imgHint}\n\n（当前为界面预览，尚未接入诊断 Agent）`,
-        images: [],
-        createdAt: Date.now(),
-      })
-      target.updatedAt = Date.now()
-    }, 420)
+
+      streamStatus.value = '生成中…'
+      let streamBubble = null
+
+      await sendMessageStream(
+        chat.id,
+        {
+          content,
+          client_msg_id: clientMsgId(),
+          relative_paths: relativePaths,
+          call_llm: true,
+        },
+        ({ event, data }) => {
+          if (event === 'meta' && data?.stage === 'user_saved' && data.user_message) {
+            const uiUser = toUiMessage(data.user_message)
+            if (!target.messages.some((m) => m.id === uiUser.id)) {
+              target.messages.push(uiUser)
+            }
+            if (data.conversation) {
+              target.title = data.conversation.title
+              target.updatedAt =
+                data.conversation.last_message_at || data.conversation.updated_at
+              target.messageCount = data.conversation.message_count
+            }
+            // 占位助手气泡
+            streamBubble = {
+              id: tempId,
+              role: 'assistant',
+              content: '',
+              images: [],
+              createdAt: new Date().toISOString(),
+              status: 'streaming',
+              streaming: true,
+            }
+            target.messages.push(streamBubble)
+            if (data.stage) streamStatus.value = data.message || streamStatus.value
+          } else if (event === 'meta') {
+            if (data?.message) streamStatus.value = data.message
+            else if (data?.stage === 'vision') streamStatus.value = '正在解析图片…'
+            else if (data?.stage === 'answer' || data?.stage === 'answer_start') {
+              streamStatus.value = data.fallback ? 'gpt-sol 生成中…' : '回答生成中…'
+            }
+          } else if (event === 'delta') {
+            if (!streamBubble) {
+              streamBubble = {
+                id: tempId,
+                role: 'assistant',
+                content: '',
+                images: [],
+                createdAt: new Date().toISOString(),
+                status: 'streaming',
+                streaming: true,
+              }
+              target.messages.push(streamBubble)
+            }
+            streamBubble.content += data?.text || ''
+          } else if (event === 'done') {
+            if (data?.assistant_message) {
+              const uiAsst = toUiMessage(data.assistant_message)
+              const idx = target.messages.findIndex((m) => m.id === tempId)
+              if (idx >= 0) target.messages.splice(idx, 1, uiAsst)
+              else if (!target.messages.some((m) => m.id === uiAsst.id)) {
+                target.messages.push(uiAsst)
+              }
+            } else if (streamBubble) {
+              streamBubble.streaming = false
+              streamBubble.status = 'normal'
+            }
+            if (data?.conversation) {
+              target.title = data.conversation.title
+              target.updatedAt =
+                data.conversation.last_message_at || data.conversation.updated_at
+              target.messageCount = data.conversation.message_count
+            }
+            streamStatus.value = ''
+          } else if (event === 'error') {
+            error.value = data?.message || '生成失败'
+            if (data?.assistant_message) {
+              const uiAsst = toUiMessage(data.assistant_message)
+              const idx = target.messages.findIndex((m) => m.id === tempId)
+              if (idx >= 0) target.messages.splice(idx, 1, uiAsst)
+            } else if (streamBubble) {
+              streamBubble.streaming = false
+              streamBubble.status = 'failed'
+              if (!streamBubble.content) {
+                streamBubble.content = `模型调用失败：${error.value}`
+              }
+            }
+            streamStatus.value = ''
+          }
+        },
+      )
+      target.loaded = true
+    } catch (e) {
+      error.value = e.message || String(e)
+      streamStatus.value = ''
+    } finally {
+      sending.value = false
+    }
   }
 
-  function formatTime(ts) {
-    return new Date(ts).toLocaleString('zh-CN', {
-      month: 'numeric',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  }
+  onMounted(() => {
+    refreshList()
+  })
 
   return {
     conversations: sortedConversations,
     activeId,
     activeChat,
+    loadingList,
+    loadingMessages,
+    sending,
+    error,
+    streamStatus,
     selectChat,
     createChat,
     sendMessage,
-    formatTime,
-    nowLabel,
+    refreshList,
   }
 }

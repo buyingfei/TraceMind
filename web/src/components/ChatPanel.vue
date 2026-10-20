@@ -3,6 +3,9 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps({
   chat: { type: Object, default: null },
+  sending: { type: Boolean, default: false },
+  error: { type: String, default: '' },
+  streamStatus: { type: String, default: '' },
 })
 
 const emit = defineEmits(['send', 'create'])
@@ -71,6 +74,7 @@ function onKeydown(event) {
 }
 
 function submit() {
+  if (props.sending) return
   const text = draft.value
   const images = pendingImages.value.map((img) => ({ ...img }))
   if (!text.trim() && !images.length) return
@@ -129,7 +133,9 @@ async function onPickFile(event) {
               :alt="img.name"
             />
           </div>
-          <div v-if="msg.content" class="text">{{ msg.content }}</div>
+          <div v-if="msg.content || msg.streaming" class="text">
+            {{ msg.content }}<span v-if="msg.streaming" class="caret" aria-hidden="true" />
+          </div>
         </div>
       </div>
     </div>
@@ -157,10 +163,14 @@ async function onPickFile(event) {
             <input type="file" accept="image/*" multiple hidden @change="onPickFile" />
             <span>图片</span>
           </label>
-          <button class="send" type="button" @click="submit">发送</button>
+          <button class="send" type="button" :disabled="sending" @click="submit">
+            {{ sending ? '发送中…' : '发送' }}
+          </button>
         </div>
       </div>
-      <div class="footnote">界面预览阶段 · 消息仅保存在浏览器内存</div>
+      <div v-if="streamStatus" class="status-line">{{ streamStatus }}</div>
+      <div v-if="error" class="error-line">{{ error }}</div>
+      <div class="footnote">SSE 流式输出 · 消息与图片已持久化</div>
     </div>
   </section>
 </template>
@@ -427,6 +437,42 @@ textarea::placeholder {
   text-align: center;
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+.error-line {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--danger);
+}
+
+.status-line {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.send:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 
 @keyframes rise {

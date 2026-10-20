@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from collections.abc import Iterator
 from functools import lru_cache
 from typing import Any
 
@@ -97,7 +98,7 @@ def _client_for_provider(provider: str) -> OpenAI:
     raise ValueError(f"不支持的 provider: {provider}")
 
 
-def _normalize_image_input(image: str) -> tuple[str, str]:
+def normalize_image_input(image: str) -> tuple[str, str]:
     """返回 (mime, base64_raw)。支持 data URL 或纯 base64。"""
     text = (image or "").strip()
     if not text:
@@ -112,6 +113,10 @@ def _normalize_image_input(image: str) -> tuple[str, str]:
     except Exception as exc:  # noqa: BLE001
         raise ValueError("图片须为 data:image/...;base64,... 或合法 base64") from exc
     return "image/png", raw
+
+
+# 兼容旧私有名
+_normalize_image_input = normalize_image_input
 
 
 def _chat_text(
@@ -394,5 +399,218 @@ def chat_with_pipeline(
         "image_description": "",
         "fallback": True,
         "steps": steps,
+        "errors": errors,
+    }
+
+
+def iter_chat_text_stream(
+    *,
+    model_key: str,
+    user_message: str,
+    system_message: str | None = None,
+    temperature: float | None = None,
+    settings: Settings | None = None,
+) -> Iterator[dict[str, Any]]:
+    """流式纯文本聊天。yield: start / delta / end / error。"""
+    cfg = settings or get_settings()
+    if model_key not in CHAT_MODEL_CATALOG:
+        yield {"type": "error", "message": f"未知模型 key: {model_key}"}
+        return
+
+    provider = CHAT_MODEL_CATALOG[model_key]["provider"]
+    model_name = _resolve_model_name(model_key, cfg)
+    client = _client_for_provider(provider)
+    messages: list[dict[str, str]] = []
+    if system_message:
+        messages.append({"role": "system", "content": system_message})
+    messages.append({"role": "user", "content": user_message})
+
+    yield {
+        "type": "start",
+        "key": model_key,
+        "provider": provider,
+        "model": model_name,
+    }
+    try:
+        stream = client.chat.completions.create(
+            model=model_name,
+            temperature=cfg.openai_temperature if temperature is None else temperature,
+            messages=messages,
+            stream=True,
+        )
+        full = []
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            piece = chunk.choices[0].delta.content or ""
+            if piece:
+                full.append(piece)
+                yield {"type": "delta", "text": piece}
+        yield {
+            "type": "end",
+            "key": model_key,
+            "provider": provider,
+            "model": model_name,
+            "reply": "".join(full),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("流式调用失败 model=%s: %s", model_key, exc)
+        yield {"type": "error", "key": model_key, "message": str(exc)}
+
+
+def iter_pipeline_stream(
+    user_message: str,
+    *,
+    images: list[str] | None = None,
+    system_message: str | None = None,
+    temperature: float | None = None,
+    settings: Settings | None = None,
+) -> Iterator[dict[str, Any]]:
+    """编排流：vision(非流) → answer(stream) → 必要时 fallback stream。
+
+    事件：meta / delta / done / error
+    """
+    cfg = settings or get_settings()
+    system = system_message or "你是 diagnose-agent 助手，用简洁中文回答。"
+    image_list = [x for x in (images or []) if (x or "").strip()]
+    errors: list[str] = []
+    image_desc = ""
+    moondream_ok = False
+
+    if image_list:
+        yield {"type": "meta", "stage": "vision", "message": "正在解析图片…"}
+        try:
+            vision = describe_images_moondream(
+                image_list,
+                question_hint=user_message,
+                settings=cfg,
+            )
+            image_desc = vision["reply"]
+            moondream_ok = True
+            yield {
+                "type": "meta",
+                "stage": "vision_done",
+                "key": "moondream2",
+                "model": vision["model"],
+                "image_description": image_desc,
+            }
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"moondream2: {exc}")
+            yield {
+                "type": "meta",
+                "stage": "vision_failed",
+                "error": str(exc),
+            }
+
+        answer_prompt = (
+            "下面是图片解析结果与用户原始问题，请综合回答用户问题。\n\n"
+            f"【图片解析】\n{image_desc or '（图片解析失败，仅根据文字问题作答）'}\n\n"
+            f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据图片解析作答）'}"
+        )
+    else:
+        answer_prompt = user_message
+
+    # 先流式 qwen
+    yield {"type": "meta", "stage": "answer", "key": "qwen2.5-7b", "message": "正在生成回答…"}
+    qwen_ok = False
+    full_reply = ""
+    answer_key = "qwen2.5-7b"
+    answer_model = _resolve_model_name("qwen2.5-7b", cfg)
+    fallback = False
+    pipeline = "qwen2.5-7b" if not image_list else "moondream2->qwen2.5-7b"
+
+    for ev in iter_chat_text_stream(
+        model_key="qwen2.5-7b",
+        user_message=answer_prompt,
+        system_message=system,
+        temperature=temperature,
+        settings=cfg,
+    ):
+        if ev["type"] == "start":
+            answer_model = ev.get("model") or answer_model
+            yield {
+                "type": "meta",
+                "stage": "answer_start",
+                "key": ev.get("key"),
+                "model": answer_model,
+            }
+        elif ev["type"] == "delta":
+            yield {"type": "delta", "text": ev.get("text") or ""}
+        elif ev["type"] == "end":
+            qwen_ok = True
+            full_reply = ev.get("reply") or ""
+            answer_key = "qwen2.5-7b"
+        elif ev["type"] == "error":
+            errors.append(f"qwen2.5-7b: {ev.get('message')}")
+
+    # qwen 失败 → gpt-sol 流式兜底（无图且双本地都失败，或无图 qwen 失败）
+    if not qwen_ok:
+        both_local_failed = (not moondream_ok) if image_list else True
+        if image_list and both_local_failed:
+            fallback_prompt = (
+                f"{user_message.strip() or '请根据上下文回答。'}\n"
+                f"（用户附带了 {len(image_list)} 张图片；本地 moondream2 与 qwen2.5-7b 均不可用。）"
+            )
+            pipeline = "fallback:gpt-sol(both-local-failed)"
+        elif image_list:
+            fallback_prompt = (
+                "下面是图片解析结果与用户原始问题，请综合回答用户问题。\n\n"
+                f"【图片解析】\n{image_desc or '（无）'}\n\n"
+                f"【用户问题】\n{user_message.strip() or '（无文字）'}"
+            )
+            pipeline = "fallback:gpt-sol(after-qwen-failed)"
+        else:
+            fallback_prompt = user_message
+            pipeline = "fallback:gpt-sol"
+
+        yield {
+            "type": "meta",
+            "stage": "fallback",
+            "key": "gpt-sol",
+            "message": "本地模型不可用，切换 gpt-sol…",
+        }
+        full_reply = ""
+        for ev in iter_chat_text_stream(
+            model_key="gpt-sol",
+            user_message=fallback_prompt,
+            system_message=system,
+            temperature=temperature,
+            settings=cfg,
+        ):
+            if ev["type"] == "start":
+                answer_key = "gpt-sol"
+                answer_model = ev.get("model") or _resolve_model_name("gpt-sol", cfg)
+                fallback = True
+                yield {
+                    "type": "meta",
+                    "stage": "answer_start",
+                    "key": "gpt-sol",
+                    "model": answer_model,
+                    "fallback": True,
+                }
+            elif ev["type"] == "delta":
+                yield {"type": "delta", "text": ev.get("text") or ""}
+            elif ev["type"] == "end":
+                full_reply = ev.get("reply") or ""
+                answer_key = "gpt-sol"
+                fallback = True
+            elif ev["type"] == "error":
+                errors.append(f"gpt-sol: {ev.get('message')}")
+                yield {"type": "error", "message": str(ev.get("message") or "gpt-sol 失败")}
+                return
+
+    if not full_reply and errors:
+        yield {"type": "error", "message": " | ".join(errors)}
+        return
+
+    yield {
+        "type": "done",
+        "key": answer_key,
+        "model": answer_model,
+        "provider": CHAT_MODEL_CATALOG[answer_key]["provider"],
+        "reply": full_reply,
+        "pipeline": pipeline,
+        "image_description": image_desc,
+        "fallback": fallback,
         "errors": errors,
     }
