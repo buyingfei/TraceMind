@@ -1,8 +1,5 @@
-"""文本切块服务（骨架占位）。"""
+"""文本/代码切块入口。"""
 
-from app.core.exceptions import NotImplementedCapabilityError
+from app.services.treesitter_java_splitter import split_java_source, split_preview_from_config
 
-
-def split_text(text: str, chunk_size: int = 500) -> list[str]:
-    """后续用于代码/文档入库前切块。"""
-    raise NotImplementedCapabilityError("chunk_splitter.split_text")
+__all__ = ["split_java_source", "split_preview_from_config"]

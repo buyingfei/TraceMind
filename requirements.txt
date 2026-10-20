@@ -12,5 +12,9 @@ openai>=2.26.0,<3.0.0
 pymilvus>=3.0.0,<4.0.0
 # pymilvus 仍依赖 pkg_resources；setuptools 81+ 可能移除它
 setuptools>=77.0.3,<81
+# Java Tree-sitter 切块
+tree-sitter>=0.23.0,<0.27.0
+tree-sitter-java>=0.23.0,<0.30.0
+pyyaml>=6.0,<7.0
 pytest>=8.0.0,<9.0.0
 python-dotenv>=1.0.0,<2.0.0

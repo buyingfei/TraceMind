@@ -1,0 +1,26 @@
+# 代码索引 / 切块预览配置
+repo:
+  name: wintogether-bff
+  root: D:\Codes\wintogether-bff
+
+# 先用单文件验证 Tree-sitter 切割效果
+preview:
+  file: wintogether-web-op\src\main\java\com\gtech\wintogether\WintogetherWebOpApplication.java
+
+splitter:
+  engine: tree-sitter
+  language: java
+  # 提取的语法节点类型（Tree-sitter Java grammar）
+  node_types:
+    - class_declaration
+    - interface_declaration
+    - enum_declaration
+    - record_declaration
+    - method_declaration
+    - constructor_declaration
+    - static_initializer
+    - compact_constructor_declaration
+  # 是否额外产出 package + import 前言块
+  include_preamble: true
+  # 单块最大字符；超出则按行再切（仍保留起止行号）
+  max_chars: 4000
