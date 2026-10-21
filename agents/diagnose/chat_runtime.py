@@ -1,4 +1,4 @@
-"""带 Postgres 记忆的对话运行时：OCR → 多轮 LLM → 写回 checkpoint。"""
+"""带 Postgres 记忆的对话运行时：OCR → 检索 → 多轮 LLM → 写回 checkpoint。"""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.diagnose.graph import get_chat_graph
 from agents.diagnose.nodes.chat_answer import (
-    _SYSTEM,
     build_human_content,
+    build_openai_messages_for_turn,
     messages_for_llm,
 )
+from agents.diagnose.nodes.retrieve_code import run_retrieve
 from app.core.config import get_settings
 from app.services import llm_service
 from app.services.checkpoint_service import thread_config
@@ -47,7 +48,6 @@ def _bootstrap_from_mysql_if_empty(
         return []
 
     rebuilt: list[Any] = []
-    # 最后一条若是刚写入的 user，本轮会再追加 HumanMessage，这里跳过最后一条 user
     trim = rows
     if trim and trim[-1].get("role") == "user":
         trim = trim[:-1]
@@ -74,20 +74,39 @@ def _bootstrap_from_mysql_if_empty(
     return rebuilt
 
 
-def _persist_turn(conversation_id: int, human_text: str, ai_text: str) -> None:
-    """把本轮 Human+AI 写入 checkpoint（不经过 answer 节点，避免重复生成）。"""
+def _persist_turn(
+    conversation_id: int,
+    human_text: str,
+    ai_text: str,
+    *,
+    code_hits: list[dict[str, Any]] | None = None,
+) -> None:
+    """把本轮 Human+AI 与检索摘要写入 checkpoint。"""
     graph = get_chat_graph()
     config = thread_config(conversation_id)
-    graph.update_state(
-        config,
+    payload: dict[str, Any] = {
+        "messages": [
+            HumanMessage(content=human_text),
+            AIMessage(content=ai_text),
+        ],
+        "reply": ai_text,
+    }
+    if code_hits is not None:
+        payload["code_hits"] = code_hits
+    graph.update_state(config, payload)
+
+
+def _hit_summaries(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
         {
-            "messages": [
-                HumanMessage(content=human_text),
-                AIMessage(content=ai_text),
-            ],
-            "reply": ai_text,
-        },
-    )
+            "path": h.get("path"),
+            "symbol": h.get("symbol"),
+            "start_line": h.get("start_line"),
+            "end_line": h.get("end_line"),
+            "score": h.get("score"),
+        }
+        for h in (hits or [])[:8]
+    ]
 
 
 def run_chat_turn(
@@ -96,7 +115,7 @@ def run_chat_turn(
     user_text: str,
     images: list[str] | None = None,
 ) -> dict[str, Any]:
-    """同步一轮：OCR → graph.invoke（带记忆）→ 返回结果。"""
+    """同步一轮：OCR → retrieve → graph.invoke → 返回结果。"""
     cfg = get_settings()
     image_list = [x for x in (images or []) if (x or "").strip()]
     image_desc = ""
@@ -121,11 +140,13 @@ def run_chat_turn(
     result = graph.invoke(
         {
             "messages": [HumanMessage(content=human)],
+            "user_text": user_text,
             "image_description": image_desc,
             "errors": errors,
         },
         config=thread_config(conversation_id),
     )
+    code_hits = list(result.get("code_hits") or [])
     return {
         "reply": result.get("reply") or "",
         "key": result.get("model_key") or "qwen2.5-7b",
@@ -135,10 +156,12 @@ def run_chat_turn(
         "provider": llm_service.CHAT_MODEL_CATALOG.get(
             result.get("model_key") or "qwen2.5-7b", {}
         ).get("provider", "ollama"),
-        "pipeline": result.get("pipeline") or "agent:memory",
+        "pipeline": result.get("pipeline") or "agent:retrieve+memory",
         "image_description": image_desc,
         "fallback": (result.get("model_key") == "gpt-sol"),
         "errors": result.get("errors") or errors,
+        "code_hits": _hit_summaries(code_hits),
+        "memory": True,
     }
 
 
@@ -148,10 +171,7 @@ def iter_chat_turn_stream(
     user_text: str,
     images: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """流式一轮：OCR meta → 带历史流式生成 → 写 checkpoint。
-
-    事件与 llm_service.iter_pipeline_stream 对齐：meta / delta / done / error
-    """
+    """流式一轮：OCR → retrieve meta → 带历史+证据流式生成 → 写 checkpoint。"""
     cfg = get_settings()
     image_list = [x for x in (images or []) if (x or "").strip()]
     image_desc = ""
@@ -183,19 +203,39 @@ def iter_chat_turn_stream(
     if not history_msgs:
         history_msgs = _snapshot_messages(conversation_id)
 
+    yield {
+        "type": "meta",
+        "stage": "retrieve",
+        "message": "正在检索代码向量库…",
+    }
+    retrieve = run_retrieve(user_text=user_text, image_description=image_desc)
+    code_hits = list(retrieve.get("code_hits") or [])
+    if retrieve.get("retrieve_error"):
+        errors.append(f"retrieve: {retrieve['retrieve_error']}")
+    yield {
+        "type": "meta",
+        "stage": "retrieve_done",
+        "message": f"检索完成，命中 {len(code_hits)} 条代码",
+        "hit_count": len(code_hits),
+        "code_hits": _hit_summaries(code_hits),
+        "retrieve_queries": retrieve.get("retrieve_queries") or [],
+        "index": retrieve.get("index") or {},
+    }
+
     openai_history = messages_for_llm(history_msgs)
-    openai_messages: list[dict[str, str]] = [
-        {"role": "system", "content": _SYSTEM},
-        *openai_history,
-        {"role": "user", "content": human},
-    ]
+    openai_messages = build_openai_messages_for_turn(
+        history_messages=history_msgs,
+        human_content=human,
+        code_hits=code_hits,
+    )
 
     yield {
         "type": "meta",
         "stage": "answer",
         "key": "qwen2.5-7b",
-        "message": "正在生成回答（含会话记忆）…",
+        "message": "正在生成回答（记忆 + 代码证据）…",
         "memory_messages": len(openai_history),
+        "hit_count": len(code_hits),
     }
 
     full_reply = ""
@@ -203,9 +243,9 @@ def iter_chat_turn_stream(
     answer_model = llm_service._resolve_model_name("qwen2.5-7b", cfg)  # noqa: SLF001
     fallback = False
     pipeline = (
-        "agent:paddleocr->qwen2.5-7b+memory"
+        "agent:ocr->retrieve->qwen2.5-7b+memory"
         if image_list
-        else "agent:qwen2.5-7b+memory"
+        else "agent:retrieve->qwen2.5-7b+memory"
     )
     qwen_ok = False
 
@@ -232,7 +272,11 @@ def iter_chat_turn_stream(
             errors.append(f"qwen2.5-7b: {ev.get('message')}")
 
     if not qwen_ok:
-        pipeline = "agent:fallback:gpt-sol+memory"
+        pipeline = (
+            "agent:ocr->retrieve->fallback:gpt-sol+memory"
+            if image_list
+            else "agent:retrieve->fallback:gpt-sol+memory"
+        )
         yield {
             "type": "meta",
             "stage": "fallback",
@@ -273,7 +317,12 @@ def iter_chat_turn_stream(
         return
 
     try:
-        _persist_turn(conversation_id, human, full_reply)
+        _persist_turn(
+            conversation_id,
+            human,
+            full_reply,
+            code_hits=code_hits,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("写 checkpoint 失败 conversation_id=%s", conversation_id)
         errors.append(f"checkpoint: {exc}")
@@ -289,4 +338,6 @@ def iter_chat_turn_stream(
         "fallback": fallback,
         "errors": errors,
         "memory": True,
+        "code_hits": _hit_summaries(code_hits),
+        "hit_count": len(code_hits),
     }

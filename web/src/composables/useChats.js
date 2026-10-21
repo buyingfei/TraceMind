@@ -184,6 +184,13 @@ export function useChats() {
           } else if (event === 'meta') {
             if (data?.message) streamStatus.value = data.message
             else if (data?.stage === 'vision') streamStatus.value = '正在 OCR 识别…'
+            else if (data?.stage === 'retrieve' || data?.stage === 'retrieve_done') {
+              streamStatus.value =
+                data?.message ||
+                (data?.stage === 'retrieve_done'
+                  ? `检索完成，命中 ${data?.hit_count ?? 0} 条代码`
+                  : '正在检索代码…')
+            }
             else if (data?.stage === 'answer' || data?.stage === 'answer_start') {
               streamStatus.value = data.fallback ? 'gpt-sol 生成中…' : '回答生成中…'
             }

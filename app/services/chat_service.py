@@ -571,6 +571,8 @@ def iter_message_sse(
             "image_description": (done_payload or {}).get("image_description"),
             "errors": (done_payload or {}).get("errors"),
             "memory": True,
+            "code_hits": (done_payload or {}).get("code_hits"),
+            "hit_count": (done_payload or {}).get("hit_count"),
             "assistant_message": persisted["assistant_message"],
             "conversation": persisted["conversation"],
             "user_message": saved["user_message"],

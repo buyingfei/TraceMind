@@ -1,7 +1,7 @@
 """排查 Graph 组装。
 
 - Hello Graph：骨架验证
-- Chat Graph：带 Postgres checkpointer 的多轮对话记忆
+- Chat Graph：retrieve → answer，挂 Postgres checkpointer
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.diagnose.nodes.chat_answer import answer_node
 from agents.diagnose.nodes.hello import greet_node
+from agents.diagnose.nodes.retrieve_code import retrieve_node
 from agents.diagnose.state import ChatAgentState, HelloState
 from app.services.checkpoint_service import get_checkpointer
 
@@ -40,10 +41,12 @@ def run_hello_graph(name: str = "World") -> HelloState:
 
 
 def build_chat_graph(*, checkpointer=None):
-    """对话 Graph：START → answer → END，挂 checkpointer。"""
+    """对话 Graph：START → retrieve → answer → END。"""
     builder = StateGraph(ChatAgentState)
+    builder.add_node("retrieve", retrieve_node)
     builder.add_node("answer", answer_node)
-    builder.add_edge(START, "answer")
+    builder.add_edge(START, "retrieve")
+    builder.add_edge("retrieve", "answer")
     builder.add_edge("answer", END)
     cp = checkpointer if checkpointer is not None else get_checkpointer()
     return builder.compile(checkpointer=cp)
