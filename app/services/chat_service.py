@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from app.core.config import get_settings
 from app.db.models import ChatConversation, ChatMessage, ChatMessageAsset
 from app.db.session import get_session_factory
+from agents.diagnose import chat_runtime
 from app.services import llm_service
 
 logger = logging.getLogger(__name__)
@@ -408,8 +409,9 @@ def send_message(
     if call_llm:
         try:
             image_data_urls = [file_to_data_url(p) for p in paths]
-            llm_result = llm_service.chat_with_pipeline(
-                text,
+            llm_result = chat_runtime.run_chat_turn(
+                conversation_id,
+                user_text=text,
                 images=image_data_urls,
             )
             llm_meta = {
@@ -419,12 +421,13 @@ def send_message(
                 "fallback": llm_result.get("fallback"),
                 "image_description": llm_result.get("image_description"),
                 "errors": llm_result.get("errors"),
+                "memory": True,
             }
             reply = llm_result.get("reply") or ""
             status = "normal"
             err = ""
         except Exception as exc:  # noqa: BLE001
-            logger.exception("对话 LLM 失败 conversation_id=%s", conversation_id)
+            logger.exception("对话 Agent 失败 conversation_id=%s", conversation_id)
             reply = f"模型调用失败：{exc}"
             status = "failed"
             err = str(exc)[:500]
@@ -504,7 +507,11 @@ def iter_message_sse(
     full_reply = ""
     done_payload: dict[str, Any] | None = None
     try:
-        for ev in llm_service.iter_pipeline_stream(text, images=image_data_urls):
+        for ev in chat_runtime.iter_chat_turn_stream(
+            conversation_id,
+            user_text=text,
+            images=image_data_urls,
+        ):
             et = ev.get("type")
             if et == "meta":
                 yield _sse_pack("meta", {k: v for k, v in ev.items() if k != "type"})
@@ -563,6 +570,7 @@ def iter_message_sse(
             "fallback": (done_payload or {}).get("fallback"),
             "image_description": (done_payload or {}).get("image_description"),
             "errors": (done_payload or {}).get("errors"),
+            "memory": True,
             "assistant_message": persisted["assistant_message"],
             "conversation": persisted["conversation"],
             "user_message": saved["user_message"],

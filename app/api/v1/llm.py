@@ -53,8 +53,9 @@ def llm_config() -> dict:
     return {
         "default_chat_model": settings.default_chat_model,
         "pipeline": {
-            "with_images": "paddleocr -> qwen2.5-7b；失败则 gpt-sol",
-            "without_images": "qwen2.5-7b -> 失败则 gpt-sol",
+            "with_images": "paddleocr -> qwen2.5-7b + Postgres记忆；失败则 gpt-sol",
+            "without_images": "qwen2.5-7b + Postgres记忆 -> 失败则 gpt-sol",
+            "memory": "langgraph checkpoint (thread_id=conversation_id)",
         },
         "openai": {
             "base_url": settings.normalized_openai_base_url(),

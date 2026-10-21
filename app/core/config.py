@@ -71,6 +71,16 @@ class Settings(BaseSettings):
     # 对话图片本地目录（相对项目根）
     chat_upload_dir: str = Field(default="data/chat_uploads")
 
+    # LangGraph Checkpointer（Postgres，与 MySQL 聊天库分离）
+    langgraph_database_url: str = Field(
+        default="postgresql://postgres:123456@127.0.0.1:5432/langgraph_mem",
+        description="Agent 短期记忆 checkpoint；psycopg 连接串",
+    )
+    agent_memory_max_messages: int = Field(
+        default=20,
+        description="喂给模型的最近消息条数上限（含 user/assistant）",
+    )
+
     @property
     def milvus_uri(self) -> str:
         return self.diagnose_milvus_uri

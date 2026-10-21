@@ -190,6 +190,36 @@ def chat(
     )
 
 
+def chat_messages(
+    messages: list[dict[str, str]],
+    *,
+    model_key: str = "qwen2.5-7b",
+    temperature: float | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """多轮 messages 聊天（已含 system/user/assistant）。"""
+    cfg = settings or get_settings()
+    if model_key not in CHAT_MODEL_CATALOG:
+        raise ValueError(f"未知模型 key: {model_key}")
+    if not messages:
+        raise ValueError("messages 不能为空")
+    provider = CHAT_MODEL_CATALOG[model_key]["provider"]
+    model_name = _resolve_model_name(model_key, cfg)
+    client = _client_for_provider(provider)
+    response = client.chat.completions.create(
+        model=model_name,
+        temperature=cfg.openai_temperature if temperature is None else temperature,
+        messages=messages,
+    )
+    content = response.choices[0].message.content
+    return {
+        "key": model_key,
+        "provider": provider,
+        "model": model_name,
+        "reply": content or "",
+    }
+
+
 def chat_with_pipeline(
     user_message: str,
     *,
@@ -377,18 +407,37 @@ def iter_chat_text_stream(
     settings: Settings | None = None,
 ) -> Iterator[dict[str, Any]]:
     """流式纯文本聊天。yield: start / delta / end / error。"""
+    messages: list[dict[str, str]] = []
+    if system_message:
+        messages.append({"role": "system", "content": system_message})
+    messages.append({"role": "user", "content": user_message})
+    yield from iter_chat_messages_stream(
+        messages=messages,
+        model_key=model_key,
+        temperature=temperature,
+        settings=settings,
+    )
+
+
+def iter_chat_messages_stream(
+    *,
+    messages: list[dict[str, str]],
+    model_key: str,
+    temperature: float | None = None,
+    settings: Settings | None = None,
+) -> Iterator[dict[str, Any]]:
+    """多轮 messages 流式聊天。yield: start / delta / end / error。"""
     cfg = settings or get_settings()
     if model_key not in CHAT_MODEL_CATALOG:
         yield {"type": "error", "message": f"未知模型 key: {model_key}"}
+        return
+    if not messages:
+        yield {"type": "error", "message": "messages 不能为空"}
         return
 
     provider = CHAT_MODEL_CATALOG[model_key]["provider"]
     model_name = _resolve_model_name(model_key, cfg)
     client = _client_for_provider(provider)
-    messages: list[dict[str, str]] = []
-    if system_message:
-        messages.append({"role": "system", "content": system_message})
-    messages.append({"role": "user", "content": user_message})
 
     yield {
         "type": "start",

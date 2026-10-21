@@ -1,15 +1,20 @@
 """排查 Graph 组装。
 
-骨架阶段仅提供 Hello Graph，验证 LangGraph 可运行且不依赖模型。
-后续在此扩展：parse → hypothesize → retrieve_code → query_db → write_answer。
+- Hello Graph：骨架验证
+- Chat Graph：带 Postgres checkpointer 的多轮对话记忆
 """
+
+from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from agents.diagnose.nodes.chat_answer import answer_node
 from agents.diagnose.nodes.hello import greet_node
-from agents.diagnose.state import HelloState
+from agents.diagnose.state import ChatAgentState, HelloState
+from app.services.checkpoint_service import get_checkpointer
 
 _hello_graph = None
+_chat_graph = None
 
 
 def build_hello_graph():
@@ -32,3 +37,26 @@ def run_hello_graph(name: str = "World") -> HelloState:
     """同步执行 Hello Graph。"""
     graph = get_hello_graph()
     return graph.invoke({"name": name, "message": ""})
+
+
+def build_chat_graph(*, checkpointer=None):
+    """对话 Graph：START → answer → END，挂 checkpointer。"""
+    builder = StateGraph(ChatAgentState)
+    builder.add_node("answer", answer_node)
+    builder.add_edge(START, "answer")
+    builder.add_edge("answer", END)
+    cp = checkpointer if checkpointer is not None else get_checkpointer()
+    return builder.compile(checkpointer=cp)
+
+
+def get_chat_graph():
+    global _chat_graph
+    if _chat_graph is None:
+        _chat_graph = build_chat_graph()
+    return _chat_graph
+
+
+def reset_chat_graph() -> None:
+    """测试或热重载时清空单例。"""
+    global _chat_graph
+    _chat_graph = None

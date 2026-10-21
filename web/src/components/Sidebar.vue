@@ -21,8 +21,8 @@ function formatTime(ts) {
     <div class="brand">
       <div class="mark" aria-hidden="true" />
       <div>
-        <div class="brand-name">Diagnose</div>
-        <div class="brand-sub">代码诊断对话</div>
+        <div class="brand-name">TraceMind</div>
+        <div class="brand-sub">溯源大脑  融合 OCR 与大模型，一站式支撑业务溯源排查、项目代码与架构智能解析。</div>
       </div>
     </div>
 
@@ -69,14 +69,21 @@ function formatTime(ts) {
 
 .brand {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   padding: 6px 8px 10px;
+}
+
+.brand > div:last-child {
+  min-width: 0;
+  flex: 1;
 }
 
 .mark {
   width: 36px;
   height: 36px;
+  flex-shrink: 0;
+  margin-top: 2px;
   border-radius: 12px;
   background:
     radial-gradient(circle at 30% 30%, #99f6e4, transparent 55%),
@@ -91,8 +98,9 @@ function formatTime(ts) {
 }
 
 .brand-sub {
-  margin-top: 2px;
-  font-size: 0.78rem;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  line-height: 1.45;
   color: rgba(236, 253, 248, 0.55);
 }
 

@@ -103,8 +103,8 @@ async function onPickFile(event) {
     <div ref="listRef" class="messages">
       <div v-if="isEmpty" class="hero">
         <div class="hero-mark" />
-        <h2>Diagnose</h2>
-        <p>把问题、报错或截图丢进来，右侧可持续开新对话。</p>
+        <h2>TraceMind</h2>
+        <p>溯源大脑  融合 OCR 与大模型，一站式支撑业务溯源排查、项目代码与架构智能解析。</p>
         <div class="hints">
           <button type="button" @click="draft = '帮我分析自动入库失败的可能原因'">
             分析自动入库失败

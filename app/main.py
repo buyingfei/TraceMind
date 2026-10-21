@@ -1,5 +1,8 @@
 """FastAPI 应用入口。"""
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -9,11 +12,26 @@ from app.core.logging import setup_logging
 
 settings = get_settings()
 setup_logging(settings.log_level)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        from app.services.checkpoint_service import ensure_checkpoint_ready
+
+        info = ensure_checkpoint_ready()
+        logger.info("checkpoint ready: %s", info)
+    except Exception:  # noqa: BLE001
+        logger.exception("LangGraph checkpoint 初始化失败（对话记忆不可用）")
+    yield
+
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     description="业务问题排查 Agent",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
