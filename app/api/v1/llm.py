@@ -53,10 +53,11 @@ def llm_config() -> dict:
     return {
         "default_chat_model": settings.default_chat_model,
         "pipeline": {
-            "with_images": "paddleocr -> Milvus检索 -> gpt-sol + Postgres记忆；失败则 qwen2.5-7b",
-            "without_images": "Milvus检索 -> gpt-sol + Postgres记忆；失败则 qwen2.5-7b",
+            "with_images": "paddleocr -> Milvus检索 -> gpt-sol（失败重试）+ Postgres记忆",
+            "without_images": "Milvus检索 -> gpt-sol（失败重试）+ Postgres记忆",
             "memory": "langgraph checkpoint (thread_id=conversation_id)",
             "retrieve": "wt_code_chunks（OCR + 用户原话语义检索）",
+            "chat_model": "gpt-sol only",
         },
         "openai": {
             "base_url": settings.normalized_openai_base_url(),

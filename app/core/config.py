@@ -41,10 +41,14 @@ class Settings(BaseSettings):
         description="OpenAI 兼容网关上的 Embedding 模型名",
     )
 
-    # 聊天模型选择：gpt-sol | qwen2.5-7b（带图走 PaddleOCR→qwen）
+    # 聊天仅用公司模型；失败按次数重试，不切换千问
     default_chat_model: str = Field(
         default="gpt-sol",
-        description="默认聊天模型 key",
+        description="默认聊天模型 key（仅 gpt-sol）",
+    )
+    llm_max_attempts: int = Field(
+        default=3,
+        description="公司模型调用最大尝试次数（含首次）",
     )
 
     # Milvus Docker（注意：不要用环境变量名 MILVUS_URI，会与 pymilvus 内置配置冲突）

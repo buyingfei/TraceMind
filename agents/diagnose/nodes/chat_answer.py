@@ -116,7 +116,7 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
     pipeline = "agent:retrieve->gpt-sol+memory"
 
     try:
-        result = llm_service.chat_messages(
+        result = llm_service.chat_messages_with_retry(
             openai_messages,
             model_key="gpt-sol",
             temperature=None,
@@ -125,26 +125,10 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
         reply = result.get("reply") or ""
         model_key = result.get("key") or model_key
     except Exception as exc:  # noqa: BLE001
-        logger.warning("gpt-sol 失败，尝试 qwen2.5-7b: %s", exc)
+        logger.warning("gpt-sol 重试后仍失败: %s", exc)
         errors.append(f"gpt-sol: {exc}")
-        try:
-            result = llm_service.chat_messages(
-                openai_messages,
-                model_key="qwen2.5-7b",
-                temperature=None,
-                settings=cfg,
-            )
-            reply = result.get("reply") or ""
-            model_key = "qwen2.5-7b"
-            pipeline = "agent:retrieve->fallback:qwen2.5-7b+memory"
-        except Exception as exc2:  # noqa: BLE001
-            errors.append(f"qwen2.5-7b: {exc2}")
-            reply = f"模型调用失败：{exc2}"
-            pipeline = "agent:failed"
-
-    if not code_hits and "未命中" not in reply:
-        # 轻量提示（模型可能已说明）
-        pass
+        reply = f"模型调用失败：{exc}"
+        pipeline = "agent:failed"
 
     return {
         "messages": [AIMessage(content=reply)],

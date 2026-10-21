@@ -158,7 +158,7 @@ def run_chat_turn(
         ).get("provider", "openai"),
         "pipeline": result.get("pipeline") or "agent:retrieve+memory",
         "image_description": image_desc,
-        "fallback": (result.get("model_key") == "qwen2.5-7b"),
+        "fallback": False,
         "errors": result.get("errors") or errors,
         "code_hits": _hit_summaries(code_hits),
         "memory": True,
@@ -241,20 +241,20 @@ def iter_chat_turn_stream(
     full_reply = ""
     answer_key = "gpt-sol"
     answer_model = llm_service._resolve_model_name("gpt-sol", cfg)  # noqa: SLF001
-    fallback = False
     pipeline = (
         "agent:ocr->retrieve->gpt-sol+memory"
         if image_list
         else "agent:retrieve->gpt-sol+memory"
     )
-    primary_ok = False
 
-    for ev in llm_service.iter_chat_messages_stream(
+    for ev in llm_service.iter_chat_messages_stream_with_retry(
         messages=openai_messages,
         model_key="gpt-sol",
         settings=cfg,
     ):
-        if ev["type"] == "start":
+        if ev["type"] == "meta":
+            yield ev
+        elif ev["type"] == "start":
             answer_model = ev.get("model") or answer_model
             yield {
                 "type": "meta",
@@ -265,55 +265,15 @@ def iter_chat_turn_stream(
         elif ev["type"] == "delta":
             yield {"type": "delta", "text": ev.get("text") or ""}
         elif ev["type"] == "end":
-            primary_ok = True
             full_reply = ev.get("reply") or ""
             answer_key = "gpt-sol"
         elif ev["type"] == "error":
             errors.append(f"gpt-sol: {ev.get('message')}")
-
-    if not primary_ok:
-        pipeline = (
-            "agent:ocr->retrieve->fallback:qwen2.5-7b+memory"
-            if image_list
-            else "agent:retrieve->fallback:qwen2.5-7b+memory"
-        )
-        yield {
-            "type": "meta",
-            "stage": "fallback",
-            "key": "qwen2.5-7b",
-            "message": "公司模型不可用，切换本地千问…",
-        }
-        for ev in llm_service.iter_chat_messages_stream(
-            messages=openai_messages,
-            model_key="qwen2.5-7b",
-            settings=cfg,
-        ):
-            if ev["type"] == "start":
-                answer_key = "qwen2.5-7b"
-                answer_model = ev.get("model") or llm_service._resolve_model_name(  # noqa: SLF001
-                    "qwen2.5-7b", cfg
-                )
-                fallback = True
-                yield {
-                    "type": "meta",
-                    "stage": "answer_start",
-                    "key": "qwen2.5-7b",
-                    "model": answer_model,
-                    "fallback": True,
-                }
-            elif ev["type"] == "delta":
-                yield {"type": "delta", "text": ev.get("text") or ""}
-            elif ev["type"] == "end":
-                full_reply = ev.get("reply") or ""
-                answer_key = "qwen2.5-7b"
-                fallback = True
-            elif ev["type"] == "error":
-                errors.append(f"qwen2.5-7b: {ev.get('message')}")
-                yield {
-                    "type": "error",
-                    "message": str(ev.get("message") or "qwen2.5-7b 失败"),
-                }
-                return
+            yield {
+                "type": "error",
+                "message": str(ev.get("message") or "gpt-sol 失败"),
+            }
+            return
 
     if not full_reply and errors:
         yield {"type": "error", "message": " | ".join(errors)}
@@ -338,7 +298,7 @@ def iter_chat_turn_stream(
         "reply": full_reply,
         "pipeline": pipeline,
         "image_description": image_desc,
-        "fallback": fallback,
+        "fallback": False,
         "errors": errors,
         "memory": True,
         "code_hits": _hit_summaries(code_hits),

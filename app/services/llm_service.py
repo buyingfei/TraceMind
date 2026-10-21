@@ -1,6 +1,6 @@
-"""多模型聊天：OpenAI 网关 gpt-sol（优先）+ 本地 Ollama qwen2.5-7b（兜底）。
+"""多模型聊天：仅公司模型 gpt-sol（失败按次数重试，不切换千问）。
 
-带图链路：PaddleOCR 识字 → gpt-sol 综合回答；失败则 qwen2.5-7b。
+带图链路：PaddleOCR 识字 → gpt-sol 综合回答。
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import time
 from collections.abc import Iterator
 from functools import lru_cache
 from typing import Any
@@ -193,7 +194,7 @@ def chat(
 def chat_messages(
     messages: list[dict[str, str]],
     *,
-    model_key: str = "qwen2.5-7b",
+    model_key: str = "gpt-sol",
     temperature: float | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -220,6 +221,113 @@ def chat_messages(
     }
 
 
+def chat_messages_with_retry(
+    messages: list[dict[str, str]],
+    *,
+    model_key: str = "gpt-sol",
+    temperature: float | None = None,
+    settings: Settings | None = None,
+    max_attempts: int | None = None,
+) -> dict[str, Any]:
+    """公司模型同步调用，失败按次数重试。"""
+    cfg = settings or get_settings()
+    attempts = max(1, int(max_attempts if max_attempts is not None else cfg.llm_max_attempts))
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            result = chat_messages(
+                messages,
+                model_key=model_key,
+                temperature=temperature,
+                settings=cfg,
+            )
+            if i > 0:
+                result = {**result, "retries": i}
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "%s 调用失败 attempt=%s/%s: %s",
+                model_key,
+                i + 1,
+                attempts,
+                exc,
+            )
+            if i + 1 < attempts:
+                time.sleep(min(1.5 * (i + 1), 4.0))
+    assert last_exc is not None
+    raise last_exc
+
+
+def iter_chat_messages_stream_with_retry(
+    *,
+    messages: list[dict[str, str]],
+    model_key: str = "gpt-sol",
+    temperature: float | None = None,
+    settings: Settings | None = None,
+    max_attempts: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    """流式调用公司模型；整轮失败则重试（先缓冲，成功后再吐出，避免半截重复）。
+
+    额外事件：meta stage=retry
+    """
+    cfg = settings or get_settings()
+    attempts = max(1, int(max_attempts if max_attempts is not None else cfg.llm_max_attempts))
+    last_error = ""
+
+    for i in range(attempts):
+        if i > 0:
+            yield {
+                "type": "meta",
+                "stage": "retry",
+                "key": model_key,
+                "attempt": i + 1,
+                "max_attempts": attempts,
+                "message": f"公司模型失败，正在重试（{i + 1}/{attempts}）…",
+            }
+            time.sleep(min(1.5 * i, 4.0))
+
+        buffered: list[dict[str, Any]] = []
+        got_end = False
+        full_reply = ""
+        err_msg = ""
+        for ev in iter_chat_messages_stream(
+            messages=messages,
+            model_key=model_key,
+            temperature=temperature,
+            settings=cfg,
+        ):
+            if ev["type"] == "error":
+                err_msg = str(ev.get("message") or "调用失败")
+                break
+            if ev["type"] == "end":
+                got_end = True
+                full_reply = ev.get("reply") or ""
+            buffered.append(ev)
+
+        if got_end and full_reply.strip():
+            for ev in buffered:
+                yield ev
+            return
+
+        if got_end and not full_reply.strip():
+            err_msg = err_msg or "模型返回空内容"
+        last_error = err_msg or last_error or "调用失败"
+        logger.warning(
+            "%s 流式失败 attempt=%s/%s: %s",
+            model_key,
+            i + 1,
+            attempts,
+            last_error,
+        )
+
+    yield {
+        "type": "error",
+        "key": model_key,
+        "message": last_error or f"{model_key} 重试后仍失败",
+    }
+
+
 def chat_with_pipeline(
     user_message: str,
     *,
@@ -228,15 +336,7 @@ def chat_with_pipeline(
     temperature: float | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """带图/纯文本编排。
-
-    有图片时：
-      1) PaddleOCR 识别文字
-      2) OCR 文本 + 原始问题 → gpt-sol（公司模型）
-      3) 失败 → qwen2.5-7b 兜底
-
-    无图片时：优先 gpt-sol，失败再 qwen2.5-7b。
-    """
+    """带图/纯文本编排：仅 gpt-sol，失败重试。"""
     cfg = settings or get_settings()
     system = system_message or "你是 diagnose-agent 助手，用简洁中文回答。"
     image_list = [x for x in (images or []) if (x or "").strip()]
@@ -275,11 +375,14 @@ def chat_with_pipeline(
             f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据OCR文字总结）'}"
         )
 
+    openai_messages: list[dict[str, str]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": answer_prompt},
+    ]
     try:
-        sol = _chat_text(
+        sol = chat_messages_with_retry(
+            openai_messages,
             model_key="gpt-sol",
-            user_message=answer_prompt,
-            system_message=system,
             temperature=temperature,
             settings=cfg,
         )
@@ -294,44 +397,14 @@ def chat_with_pipeline(
             "pipeline": "paddleocr->gpt-sol" if image_list else "gpt-sol",
             "image_description": image_desc,
             "fallback": False,
+            "retries": sol.get("retries", 0),
             "steps": steps,
             "errors": errors,
         }
     except Exception as exc:  # noqa: BLE001
-        logger.warning("gpt-sol 调用失败: %s", exc)
         errors.append(f"gpt-sol: {exc}")
         steps.append({"step": "answer", "ok": False, "error": str(exc)})
-
-    try:
-        qwen = _chat_text(
-            model_key="qwen2.5-7b",
-            user_message=answer_prompt,
-            system_message=system,
-            temperature=temperature,
-            settings=cfg,
-        )
-        steps.append(
-            {"step": "fallback", "ok": True, "key": qwen["key"], "model": qwen["model"]}
-        )
-        return {
-            "key": qwen["key"],
-            "provider": qwen["provider"],
-            "model": qwen["model"],
-            "reply": qwen["reply"],
-            "pipeline": (
-                "fallback:qwen2.5-7b(after-gpt-sol-failed)"
-                if image_list
-                else "fallback:qwen2.5-7b"
-            ),
-            "image_description": image_desc,
-            "fallback": True,
-            "steps": steps,
-            "errors": errors,
-        }
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"qwen2.5-7b: {exc}")
-        steps.append({"step": "fallback", "ok": False, "error": str(exc)})
-        raise RuntimeError("gpt-sol 与 qwen2.5-7b 均调用失败: " + " | ".join(errors)) from exc
+        raise RuntimeError("gpt-sol 重试后仍失败: " + " | ".join(errors)) from exc
 
 
 def iter_chat_text_stream(
@@ -461,21 +534,24 @@ def iter_pipeline_stream(
         answer_prompt = user_message
 
     yield {"type": "meta", "stage": "answer", "key": "gpt-sol", "message": "正在生成回答…"}
-    primary_ok = False
     full_reply = ""
     answer_key = "gpt-sol"
     answer_model = _resolve_model_name("gpt-sol", cfg)
-    fallback = False
     pipeline = "gpt-sol" if not image_list else "paddleocr->gpt-sol"
+    openai_messages: list[dict[str, str]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": answer_prompt},
+    ]
 
-    for ev in iter_chat_text_stream(
+    for ev in iter_chat_messages_stream_with_retry(
+        messages=openai_messages,
         model_key="gpt-sol",
-        user_message=answer_prompt,
-        system_message=system,
         temperature=temperature,
         settings=cfg,
     ):
-        if ev["type"] == "start":
+        if ev["type"] == "meta":
+            yield ev
+        elif ev["type"] == "start":
             answer_model = ev.get("model") or answer_model
             yield {
                 "type": "meta",
@@ -486,56 +562,12 @@ def iter_pipeline_stream(
         elif ev["type"] == "delta":
             yield {"type": "delta", "text": ev.get("text") or ""}
         elif ev["type"] == "end":
-            primary_ok = True
             full_reply = ev.get("reply") or ""
             answer_key = "gpt-sol"
         elif ev["type"] == "error":
             errors.append(f"gpt-sol: {ev.get('message')}")
-
-    if not primary_ok:
-        pipeline = (
-            "fallback:qwen2.5-7b(after-gpt-sol-failed)"
-            if image_list
-            else "fallback:qwen2.5-7b"
-        )
-        yield {
-            "type": "meta",
-            "stage": "fallback",
-            "key": "qwen2.5-7b",
-            "message": "公司模型不可用，切换本地千问…",
-        }
-        full_reply = ""
-        for ev in iter_chat_text_stream(
-            model_key="qwen2.5-7b",
-            user_message=answer_prompt,
-            system_message=system,
-            temperature=temperature,
-            settings=cfg,
-        ):
-            if ev["type"] == "start":
-                answer_key = "qwen2.5-7b"
-                answer_model = ev.get("model") or _resolve_model_name("qwen2.5-7b", cfg)
-                fallback = True
-                yield {
-                    "type": "meta",
-                    "stage": "answer_start",
-                    "key": "qwen2.5-7b",
-                    "model": answer_model,
-                    "fallback": True,
-                }
-            elif ev["type"] == "delta":
-                yield {"type": "delta", "text": ev.get("text") or ""}
-            elif ev["type"] == "end":
-                full_reply = ev.get("reply") or ""
-                answer_key = "qwen2.5-7b"
-                fallback = True
-            elif ev["type"] == "error":
-                errors.append(f"qwen2.5-7b: {ev.get('message')}")
-                yield {
-                    "type": "error",
-                    "message": str(ev.get("message") or "qwen2.5-7b 失败"),
-                }
-                return
+            yield {"type": "error", "message": str(ev.get("message") or "gpt-sol 失败")}
+            return
 
     if not full_reply and errors:
         yield {"type": "error", "message": " | ".join(errors)}
@@ -549,6 +581,6 @@ def iter_pipeline_stream(
         "reply": full_reply,
         "pipeline": pipeline,
         "image_description": image_desc,
-        "fallback": fallback,
+        "fallback": False,
         "errors": errors,
     }
