@@ -21,8 +21,7 @@ diagnose-agent/
 ├── web/                     # Vue 前端（后续）
 ├── tests/
 ├── docker-compose.yml       # Postgres + Milvus
-├── requirements.txt         # 骨架最小依赖
-└── requirements_full.txt    # 完整依赖（后续）
+└── requirements.txt         # 项目依赖（含 LangChain / OCR 等）
 ```
 
 ## 环境
