@@ -63,8 +63,35 @@ def _hit_key(hit: dict[str, Any]) -> str:
     return f"{path}:{start}-{end}"
 
 
-def _merge_hits(batches: list[list[dict[str, Any]]], *, limit: int) -> list[dict[str, Any]]:
-    """按 id 去重，按 score 降序取前 limit（score 越大越相似，COSINE distance 视 milvus 返回而定）。"""
+_CRITICAL_SYMBOLS = {
+    "isFalseClaim",
+    "isChainStore",
+    "createOut",
+    "createIn",
+    "k2InAndOrgCodeNotEquals",
+    "k2OutAndOrgCodeNotEquals",
+    "queryScanStoreTyre",
+}
+
+
+def _is_critical_hit(hit: dict[str, Any]) -> bool:
+    symbol = str(hit.get("symbol") or "")
+    if symbol in _CRITICAL_SYMBOLS:
+        return True
+    path = str(hit.get("path") or "")
+    text = str(hit.get("text") or "")
+    if "RetailCommService" in path and "isFalseClaim" in (symbol + text[:200]):
+        return True
+    return any(name in symbol for name in _CRITICAL_SYMBOLS)
+
+
+def _merge_hits(
+    batches: list[list[dict[str, Any]]],
+    *,
+    limit: int,
+    prefer_critical: bool = False,
+) -> list[dict[str, Any]]:
+    """按 id 去重，按 score 降序取前 limit；prefer_critical 时优先保留关键路径命中。"""
     best: dict[str, dict[str, Any]] = {}
     for batch in batches:
         for hit in batch or []:
@@ -73,11 +100,35 @@ def _merge_hits(batches: list[list[dict[str, Any]]], *, limit: int) -> list[dict
             if prev is None:
                 best[key] = hit
                 continue
-            # 保留更高分（COSINE 下 distance 常为相似度）
             if float(hit.get("score") or 0) > float(prev.get("score") or 0):
                 best[key] = hit
-    merged = sorted(best.values(), key=lambda h: float(h.get("score") or 0), reverse=True)
-    return merged[: max(1, limit)]
+
+    all_hits = list(best.values())
+    ranked = sorted(all_hits, key=lambda h: float(h.get("score") or 0), reverse=True)
+    if not prefer_critical:
+        return ranked[: max(1, limit)]
+
+    critical = [h for h in ranked if _is_critical_hit(h)]
+    others = [h for h in ranked if not _is_critical_hit(h)]
+    # 关键路径至少占一半名额（有则优先），其余按分数补齐
+    reserve = min(len(critical), max(3, limit // 2))
+    picked = critical[:reserve]
+    picked_keys = {_hit_key(h) for h in picked}
+    for h in others:
+        if len(picked) >= limit:
+            break
+        if _hit_key(h) in picked_keys:
+            continue
+        picked.append(h)
+        picked_keys.add(_hit_key(h))
+    # 若名额仍空，继续塞剩余 critical
+    for h in critical[reserve:]:
+        if len(picked) >= limit:
+            break
+        if _hit_key(h) in picked_keys:
+            continue
+        picked.append(h)
+    return picked[: max(1, limit)]
 
 
 def retrieve_for_diagnose(
@@ -86,6 +137,7 @@ def retrieve_for_diagnose(
     top_k_per_query: int = 6,
     final_top_k: int = 8,
     repo: str = _DEFAULT_REPO,
+    prefer_critical: bool = False,
 ) -> dict[str, Any]:
     """多路语义检索并合并；自动带上当前索引版本过滤。"""
     filters = _load_index_filters(repo)
@@ -115,7 +167,11 @@ def retrieve_for_diagnose(
             errors.append(f"{q[:40]}: {exc}")
             batches.append([])
 
-    hits = _merge_hits(batches, limit=final_top_k)
+    hits = _merge_hits(
+        batches,
+        limit=final_top_k,
+        prefer_critical=prefer_critical,
+    )
     return {
         "hits": hits,
         "queries": cleaned,

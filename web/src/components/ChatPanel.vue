@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
+import { renderMarkdown } from '../utils/markdown'
 
 const props = defineProps({
   chat: { type: Object, default: null },
@@ -133,8 +134,14 @@ async function onPickFile(event) {
               :alt="img.name"
             />
           </div>
-          <div v-if="msg.content || msg.streaming" class="text">
-            {{ msg.content }}<span v-if="msg.streaming" class="caret" aria-hidden="true" />
+          <div v-if="msg.content || msg.streaming" class="text" :class="{ md: msg.role === 'assistant' }">
+            <template v-if="msg.role === 'assistant'">
+              <div class="md-body" v-html="renderMarkdown(msg.content)" />
+              <span v-if="msg.streaming" class="caret" aria-hidden="true" />
+            </template>
+            <template v-else>
+              {{ msg.content }}
+            </template>
           </div>
         </div>
       </div>
@@ -297,7 +304,6 @@ async function onPickFile(event) {
   padding: 12px 14px;
   border-radius: 18px;
   line-height: 1.65;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -306,12 +312,75 @@ async function onPickFile(event) {
   background: linear-gradient(145deg, #0f766e, #115e59);
   border-bottom-right-radius: 6px;
   box-shadow: 0 10px 24px rgba(15, 118, 110, 0.22);
+  white-space: pre-wrap;
 }
 
 .assistant .bubble {
   background: var(--bot-bubble);
   border-bottom-left-radius: 6px;
   box-shadow: var(--shadow);
+}
+
+.text.md {
+  white-space: normal;
+}
+
+.md-body :deep(p) {
+  margin: 0 0 0.65em;
+}
+
+.md-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.md-body :deep(strong) {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.md-body :deep(ul),
+.md-body :deep(ol) {
+  margin: 0.35em 0 0.65em;
+  padding-left: 1.35em;
+}
+
+.md-body :deep(li) {
+  margin: 0.2em 0;
+}
+
+.md-body :deep(code) {
+  padding: 0.1em 0.35em;
+  border-radius: 6px;
+  font-size: 0.9em;
+  background: rgba(15, 118, 110, 0.08);
+}
+
+.md-body :deep(pre) {
+  margin: 0.5em 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  overflow: auto;
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.md-body :deep(pre code) {
+  padding: 0;
+  background: transparent;
+}
+
+.md-body :deep(h1),
+.md-body :deep(h2),
+.md-body :deep(h3) {
+  margin: 0.7em 0 0.4em;
+  font-size: 1.05em;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.md-body :deep(h1:first-child),
+.md-body :deep(h2:first-child),
+.md-body :deep(h3:first-child) {
+  margin-top: 0;
 }
 
 .msg-images {

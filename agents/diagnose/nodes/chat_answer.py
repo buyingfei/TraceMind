@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
+from agents.diagnose.biz_verify import needs_biz_sql_verify, sql_cookbook_suffix
 from agents.diagnose.nodes.retrieve_code import format_code_evidence
 from agents.diagnose.state import ChatAgentState
 from agents.diagnose.tool_loop import chat_with_optional_tools
@@ -29,6 +30,11 @@ _SYMBOL_LINE_RE = re.compile(
     r"(?m)^[ \t]*[-*•]?\s*(?:symbol|方法|类名|文件)\s*[=:：]\s*.+$",
     re.IGNORECASE,
 )
+_JAVA_IDENT_RE = re.compile(
+    r"\b(?:isFalseClaim|isChainStore|createOut|createIn|k2InAndOrgCodeNotEquals|"
+    r"queryScanStoreTyre|RetailCommService|TyreStatusVerifierService|"
+    r"StoreRelationShip)\b"
+)
 
 
 def resolve_answer_audience(settings=None) -> str:
@@ -41,23 +47,22 @@ def resolve_answer_audience(settings=None) -> str:
 
 _SYSTEM_BUSINESS = (
     "你是 TraceMind（溯源大脑）助手，面向业务同学回答。"
-    "结合对话历史、截图 OCR 事实，以及系统内部检索到的实现逻辑（仅作推理依据），"
-    "用简洁中文给出业务可理解的原因说明；不要编造未出现在证据或对话中的事实。"
-    "严禁在回复中出现任何代码定位信息：文件路径、.java/.xml 等扩展名、行号、"
-    "类名、方法名、symbol、包名、Git 路径。"
-    "当业务事实不确定（如胎号流水、门店库存归属、是否自动入出库、单据状态等），"
-    "必须调用工具 run_readonly_sql 查询业务只读库核对后再下结论；"
-    "不要把原始 SQL、表名、字段名写进对用户的回复。"
+    "推理阶段可以充分使用内部代码检索证据（含类名、方法名、路径）与查库结果，"
+    "用来判断触发方与业务路径；但最终给用户的回复必须是纯业务语言。"
+    "最终回复严禁出现：文件路径、.java/.xml 等扩展名、行号、类名、方法名、"
+    "symbol、包名、Git 路径、原始 SQL、表名、字段名。"
+    "涉及胎号流水、门店入出库、连锁归属、是否自动入出库时："
+    "必须先调用 run_readonly_sql 查业务只读库核对（尤其 is_auto），再下结论；"
+    "查库失败须明确说明未能用库核对。"
 )
 
 _FORMAT_BUSINESS = (
-    "请按以下结构回答（不要增加「技术依据」「代码引用」等章节）：\n"
-    "1. 业务结论：是否异常/是否符合系统规则（用业务语言）\n"
-    "2. 原因说明：用业务语言解释为什么会出现该现象（可提「连锁门店」「自动入出库」"
-    "「库存归属转移」等，但不要提代码怎么写）\n"
-    "3. 与截图对齐：若有 OCR/流水，点明对应门店与操作类型（如 K2零出→K2入库）\n"
-    "若截图/对话不足以确认关键数据，先用 run_readonly_sql 查库核对；"
-    "查库后仍不足时，说明「依据当前信息无法完全确认」并标注不确定。"
+    "请按以下结构输出最终回复（不要出现「技术依据」「代码引用」等章节）：\n"
+    "1. 业务结论：是否异常/是否符合系统规则；点明是谁触发、谁的操作是系统自动补账\n"
+    "2. 原因说明：用业务语言解释（可提连锁门店、自动入出库、库存归属转移）；"
+    "区分「B 主动入库触发 A 自动出」与「B 零售触发连锁补入出」\n"
+    "3. 与截图/流水对齐：门店、操作类型、时间；可描述「系统自动」但不要写字段名\n"
+    "须先查库再写上述结构；查库后仍不足则标注不确定。"
 )
 
 _SYSTEM_TECHNICAL = (
@@ -65,15 +70,15 @@ _SYSTEM_TECHNICAL = (
     "结合对话历史、截图 OCR 事实与代码检索证据，用简洁中文回答；"
     "不要编造未出现在证据或对话中的事实。"
     "若有代码证据，必须在「技术依据」中引用 path:行号 或方法名。"
-    "业务数据不确定时，调用 run_readonly_sql 查只读库核对后再结论。"
+    "涉及胎号/门店入出库时，必须先 run_readonly_sql 查只读库（含 is_auto）再结论。"
 )
 
 _FORMAT_TECHNICAL = (
     "请按以下结构回答：\n"
-    "1. 业务结论：用业务语言说明原因（是否故障/是否自动归属转移）\n"
+    "1. 业务结论：用业务语言说明原因（是否故障/是否自动归属转移；谁触发）\n"
     "2. 技术依据：引用检索到的代码（path:行号 / symbol），说明关键判断与入出库调用\n"
     "3. 与截图对齐：若有 OCR/流水，点明对应门店与操作类型（如 K2零出→K2入库）\n"
-    "数据不确定时先 run_readonly_sql 核对；"
+    "数据类问题必须先查库；"
     "若未命中代码，明确说明「未命中代码，请先完成索引」，仍可基于截图做有限推测并标注不确定。"
 )
 
@@ -119,30 +124,40 @@ def build_evidence_user_suffix(
     *,
     code_hits: list[dict[str, Any]] | None,
     audience: str | None = None,
+    require_sql: bool = False,
 ) -> str:
-    """检索证据注入：business 强调勿复述代码定位；technical 保留原文证据。"""
+    """检索证据注入：过程可用完整代码；business 仅约束最终回复不复述定位。"""
     hits = code_hits or []
     mode = audience or resolve_answer_audience()
+    parts: list[str] = []
+
     if mode == "technical":
         evidence = format_code_evidence(hits)
-        return f"\n\n【代码检索证据】\n{evidence}"
-
-    if not hits:
-        return (
+        parts.append(f"\n\n【代码检索证据】\n{evidence}")
+    elif not hits:
+        parts.append(
             "\n\n【内部参考】\n"
-            "（未检索到相关实现；请主要依据截图与用户描述作答，并标注不确定。）"
+            "（未检索到相关实现；请主要依据截图、查库结果与用户描述作答，并标注不确定。）"
         )
-    # 仍提供代码文本供模型推理，但明确禁止复述定位信息
-    evidence = format_code_evidence(hits)
-    return (
-        "\n\n【内部实现参考（仅供你推理，禁止写入对用户的回复）】\n"
-        f"{evidence}\n"
-        "注意：对用户的最终回复中不得出现上述任何路径、行号、类名或方法名。"
-    )
+    else:
+        evidence = format_code_evidence(hits)
+        parts.append(
+            "\n\n【内部实现参考——可在推理中使用类名/方法/路径，禁止写入最终对用户回复】\n"
+            f"{evidence}\n"
+            "最终回复请改写成业务语言，不要出现上述路径、行号、类名或方法名。"
+        )
+
+    if require_sql and biz_readonly_enabled():
+        parts.append(sql_cookbook_suffix())
+        parts.append(
+            "\n\n【硬性要求】本题必须先调用 run_readonly_sql 查库核对后再写最终回答。"
+        )
+
+    return "".join(parts)
 
 
 def sanitize_reply_for_audience(reply: str, *, audience: str | None = None) -> str:
-    """business 模式下剥离路径/行号等代码痕迹。"""
+    """business 模式下剥离路径/行号/关键方法名等代码痕迹。"""
     text = reply or ""
     mode = audience or resolve_answer_audience()
     if mode != "business" or not text.strip():
@@ -151,9 +166,10 @@ def sanitize_reply_for_audience(reply: str, *, audience: str | None = None) -> s
     cleaned = _CODE_PATH_RE.sub("", text)
     cleaned = _INLINE_JAVA_LOC_RE.sub("", cleaned)
     cleaned = _SYMBOL_LINE_RE.sub("", cleaned)
-    # 常见章节标题弱化
+    cleaned = _JAVA_IDENT_RE.sub("系统逻辑", cleaned)
     cleaned = re.sub(r"(?m)^[ \t]*#{0,3}\s*技术依据\s*[:：]?\s*$", "", cleaned)
     cleaned = re.sub(r"(?m)^[ \t]*\d+\.\s*技术依据\s*[:：]?\s*$", "", cleaned)
+    cleaned = re.sub(r"\b(?:t_scan_store_record_tyre(?:_\d+)?|is_auto|SCAN_TYPE)\b", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned or text.strip()
 
@@ -164,13 +180,22 @@ def build_openai_messages_for_turn(
     human_content: str,
     code_hits: list[dict[str, Any]] | None = None,
     audience: str | None = None,
+    require_sql: bool | None = None,
+    user_text: str = "",
+    image_description: str = "",
 ) -> list[dict[str, str]]:
     """组装含证据的多轮 messages（供流式/同步共用）。"""
     mode = audience or resolve_answer_audience()
     history = messages_for_llm(history_messages)
+    must_sql = (
+        require_sql
+        if require_sql is not None
+        else needs_biz_sql_verify(user_text or human_content, image_description)
+    )
     user_content = human_content + build_evidence_user_suffix(
         code_hits=code_hits,
         audience=mode,
+        require_sql=bool(must_sql and biz_readonly_enabled()),
     )
     return [
         {"role": "system", "content": build_system_prompt(audience=mode)},
@@ -193,12 +218,18 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
             history_without_last_human = history_all[:-1]
 
     human = last_human or str(state.get("user_text") or "")
+    user_text = str(state.get("user_text") or human)
+    image_description = str(state.get("image_description") or "")
     code_hits = list(state.get("code_hits") or [])
+    require_sql = needs_biz_sql_verify(user_text, image_description) and biz_readonly_enabled()
     openai_messages = build_openai_messages_for_turn(
         history_messages=history_without_last_human,
         human_content=human,
         code_hits=code_hits,
         audience=audience,
+        require_sql=require_sql,
+        user_text=user_text,
+        image_description=image_description,
     )
 
     errors: list[str] = list(state.get("errors") or [])
@@ -212,6 +243,7 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
             openai_messages,
             model_key="gpt-sol",
             settings=cfg,
+            require_sql=require_sql,
         )
         reply = sanitize_reply_for_audience(
             result.get("reply") or "",
@@ -221,6 +253,9 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
         used_sql = bool(result.get("used_tools"))
         if used_sql:
             pipeline = "agent:retrieve->sql->gpt-sol+memory"
+        elif require_sql:
+            pipeline = "agent:retrieve->gpt-sol+sql-required+memory"
+            errors.append("require_sql: 模型未成功完成查库核对")
         elif biz_readonly_enabled():
             pipeline = "agent:retrieve->gpt-sol+tools+memory"
     except Exception as exc:  # noqa: BLE001

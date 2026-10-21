@@ -9,6 +9,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.diagnose.graph import get_chat_graph
+from agents.diagnose.biz_verify import needs_biz_sql_verify
 from agents.diagnose.nodes.chat_answer import (
     build_human_content,
     build_openai_messages_for_turn,
@@ -216,39 +217,53 @@ def iter_chat_turn_stream(
     code_hits = list(retrieve.get("code_hits") or [])
     if retrieve.get("retrieve_error"):
         errors.append(f"retrieve: {retrieve['retrieve_error']}")
+    path_boost = bool(retrieve.get("path_boost"))
     yield {
         "type": "meta",
         "stage": "retrieve_done",
-        "message": f"检索完成，命中 {len(code_hits)} 条代码",
+        "message": (
+            f"检索完成，命中 {len(code_hits)} 条代码"
+            + ("（已补关键路径）" if path_boost else "")
+        ),
         "hit_count": len(code_hits),
         "code_hits": _hit_summaries(code_hits),
         "retrieve_queries": retrieve.get("retrieve_queries") or [],
         "index": retrieve.get("index") or {},
+        "path_boost": path_boost,
     }
 
     audience = resolve_answer_audience(cfg)
+    sql_ready = biz_readonly_enabled()
+    require_sql = needs_biz_sql_verify(user_text, image_desc) and sql_ready
     openai_history = messages_for_llm(history_msgs)
     openai_messages = build_openai_messages_for_turn(
         history_messages=history_msgs,
         human_content=human,
         code_hits=code_hits,
         audience=audience,
+        require_sql=require_sql,
+        user_text=user_text,
+        image_description=image_desc,
     )
 
-    sql_ready = biz_readonly_enabled()
     yield {
         "type": "meta",
         "stage": "answer",
         "key": "gpt-sol",
         "message": (
-            "正在生成回答（必要时会查业务只读库核对）…"
-            if sql_ready
-            else "正在生成回答…"
+            "正在生成回答（将先查业务只读库核对）…"
+            if require_sql
+            else (
+                "正在生成回答（必要时会查业务只读库核对）…"
+                if sql_ready
+                else "正在生成回答…"
+            )
         ),
         "memory_messages": len(openai_history),
         "hit_count": len(code_hits),
         "answer_audience": audience,
         "biz_sql_enabled": sql_ready,
+        "require_sql": require_sql,
     }
 
     full_reply = ""
@@ -266,6 +281,7 @@ def iter_chat_turn_stream(
             openai_messages,
             model_key="gpt-sol",
             settings=cfg,
+            require_sql=require_sql,
         ):
             if ev.get("type") == "meta":
                 yield ev
@@ -277,6 +293,8 @@ def iter_chat_turn_stream(
                 answer_key = ev.get("key") or "gpt-sol"
                 answer_model = ev.get("model") or answer_model
                 used_tools = bool(ev.get("used_tools"))
+                if require_sql and not used_tools:
+                    errors.append("require_sql: 模型未成功完成查库核对")
                 if full_reply:
                     yield {"type": "delta", "text": full_reply}
     except Exception as exc:  # noqa: BLE001

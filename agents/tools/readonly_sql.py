@@ -76,6 +76,13 @@ def run_select(
     limit = max_rows if max_rows is not None else int(cfg.biz_readonly_max_rows)
     limit = max(1, min(limit, 200))
     safe_sql = _normalize_sql(sql)
+    # 若模型已写 LIMIT，去掉末尾 LIMIT 再统一包一层，避免双重 LIMIT
+    safe_sql = re.sub(
+        r"\s+LIMIT\s+\d+(\s*,\s*\d+)?\s*$",
+        "",
+        safe_sql,
+        flags=re.IGNORECASE,
+    )
 
     # 外层再包一层 LIMIT，防止模型漏写
     wrapped = f"SELECT * FROM ({safe_sql}) AS _diag_ro LIMIT {limit + 1}"
@@ -145,9 +152,9 @@ READONLY_SQL_TOOL = {
         "name": "run_readonly_sql",
         "description": (
             "查询业务只读库（cn_wintogether_db）以核对数据。仅可执行 SELECT/WITH 查询。"
-            "当截图/对话信息不足以确认业务事实（如胎号流水、门店关系、是否自动入库）时使用。"
-            "不确定表名时，可先查 information_schema.TABLES / COLUMNS；"
-            "不要用于改数；不要无 LIMIT 扫全表，优先加业务条件。"
+            "胎号/门店入出库类问题必须使用；重点核对接扫码明细的 is_auto、门店、时间。"
+            "扫码胎号在分表 t_scan_store_record_tyre_0..N；不确定列名先查 information_schema。"
+            "不要用于改数；不要无 LIMIT 扫全表，优先加 TYRE_CODE 等条件。"
         ),
         "parameters": {
             "type": "object",
