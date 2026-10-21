@@ -91,6 +91,12 @@ class Settings(BaseSettings):
         description="喂给模型的最近消息条数上限（含 user/assistant）",
     )
 
+    # 回答受众：business=业务话术不露代码；technical=可含 path/行号
+    answer_audience: str = Field(
+        default="business",
+        description="business | technical",
+    )
+
     @property
     def milvus_uri(self) -> str:
         return self.diagnose_milvus_uri

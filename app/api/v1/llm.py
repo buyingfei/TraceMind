@@ -58,6 +58,7 @@ def llm_config() -> dict:
             "memory": "langgraph checkpoint (thread_id=conversation_id)",
             "retrieve": "wt_code_chunks（OCR + 用户原话语义检索）",
             "chat_model": "gpt-sol only",
+            "answer_audience": settings.answer_audience,
         },
         "openai": {
             "base_url": settings.normalized_openai_base_url(),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -14,14 +15,53 @@ from app.services import llm_service
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = (
+# 业务回复中剥离常见代码定位痕迹
+_CODE_PATH_RE = re.compile(
+    r"(?m)^[ \t]*[-*•]?\s*`?(?:[\w./\\-]+\.(?:java|xml|yml|yaml|kt|ts|js|py))`?"
+    r"(?:\s*[:：]\s*\d+(?:\s*[-–—]\s*\d+)?)?`?\s*$"
+)
+_INLINE_JAVA_LOC_RE = re.compile(
+    r"`?[\w./\\-]+\.(?:java|xml|yml|yaml|kt)\s*:\s*\d+(?:\s*[-–—]\s*\d+)?`?"
+)
+_SYMBOL_LINE_RE = re.compile(
+    r"(?m)^[ \t]*[-*•]?\s*(?:symbol|方法|类名|文件)\s*[=:：]\s*.+$",
+    re.IGNORECASE,
+)
+
+
+def resolve_answer_audience(settings=None) -> str:
+    cfg = settings or get_settings()
+    audience = (cfg.answer_audience or "business").strip().lower()
+    if audience not in ("business", "technical"):
+        return "business"
+    return audience
+
+
+_SYSTEM_BUSINESS = (
+    "你是 TraceMind（溯源大脑）助手，面向业务同学回答。"
+    "结合对话历史、截图 OCR 事实，以及系统内部检索到的实现逻辑（仅作推理依据），"
+    "用简洁中文给出业务可理解的原因说明；不要编造未出现在证据或对话中的事实。"
+    "严禁在回复中出现任何代码定位信息：文件路径、.java/.xml 等扩展名、行号、"
+    "类名、方法名、symbol、包名、Git 路径。"
+)
+
+_FORMAT_BUSINESS = (
+    "请按以下结构回答（不要增加「技术依据」「代码引用」等章节）：\n"
+    "1. 业务结论：是否异常/是否符合系统规则（用业务语言）\n"
+    "2. 原因说明：用业务语言解释为什么会出现该现象（可提「连锁门店」「自动入出库」"
+    "「库存归属转移」等，但不要提代码怎么写）\n"
+    "3. 与截图对齐：若有 OCR/流水，点明对应门店与操作类型（如 K2零出→K2入库）\n"
+    "若内部证据不足，说明「依据当前信息无法完全确认」，可基于截图做有限推测并标注不确定。"
+)
+
+_SYSTEM_TECHNICAL = (
     "你是 TraceMind（溯源大脑）助手。"
     "结合对话历史、截图 OCR 事实与代码检索证据，用简洁中文回答；"
     "不要编造未出现在证据或对话中的事实。"
     "若有代码证据，必须在「技术依据」中引用 path:行号 或方法名。"
 )
 
-_ANSWER_FORMAT = (
+_FORMAT_TECHNICAL = (
     "请按以下结构回答：\n"
     "1. 业务结论：用业务语言说明原因（是否故障/是否自动归属转移）\n"
     "2. 技术依据：引用检索到的代码（path:行号 / symbol），说明关键判断与入出库调用\n"
@@ -60,16 +100,54 @@ def messages_for_llm(
     return converted
 
 
-def build_system_prompt() -> str:
-    return "\n".join([_SYSTEM, _ANSWER_FORMAT])
+def build_system_prompt(*, audience: str | None = None) -> str:
+    mode = audience or resolve_answer_audience()
+    if mode == "technical":
+        return "\n".join([_SYSTEM_TECHNICAL, _FORMAT_TECHNICAL])
+    return "\n".join([_SYSTEM_BUSINESS, _FORMAT_BUSINESS])
 
 
 def build_evidence_user_suffix(
     *,
     code_hits: list[dict[str, Any]] | None,
+    audience: str | None = None,
 ) -> str:
-    evidence = format_code_evidence(code_hits or [])
-    return f"\n\n【代码检索证据】\n{evidence}"
+    """检索证据注入：business 强调勿复述代码定位；technical 保留原文证据。"""
+    hits = code_hits or []
+    mode = audience or resolve_answer_audience()
+    if mode == "technical":
+        evidence = format_code_evidence(hits)
+        return f"\n\n【代码检索证据】\n{evidence}"
+
+    if not hits:
+        return (
+            "\n\n【内部参考】\n"
+            "（未检索到相关实现；请主要依据截图与用户描述作答，并标注不确定。）"
+        )
+    # 仍提供代码文本供模型推理，但明确禁止复述定位信息
+    evidence = format_code_evidence(hits)
+    return (
+        "\n\n【内部实现参考（仅供你推理，禁止写入对用户的回复）】\n"
+        f"{evidence}\n"
+        "注意：对用户的最终回复中不得出现上述任何路径、行号、类名或方法名。"
+    )
+
+
+def sanitize_reply_for_audience(reply: str, *, audience: str | None = None) -> str:
+    """business 模式下剥离路径/行号等代码痕迹。"""
+    text = reply or ""
+    mode = audience or resolve_answer_audience()
+    if mode != "business" or not text.strip():
+        return text
+
+    cleaned = _CODE_PATH_RE.sub("", text)
+    cleaned = _INLINE_JAVA_LOC_RE.sub("", cleaned)
+    cleaned = _SYMBOL_LINE_RE.sub("", cleaned)
+    # 常见章节标题弱化
+    cleaned = re.sub(r"(?m)^[ \t]*#{0,3}\s*技术依据\s*[:：]?\s*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^[ \t]*\d+\.\s*技术依据\s*[:：]?\s*$", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned or text.strip()
 
 
 def build_openai_messages_for_turn(
@@ -77,12 +155,17 @@ def build_openai_messages_for_turn(
     history_messages: list[Any],
     human_content: str,
     code_hits: list[dict[str, Any]] | None = None,
+    audience: str | None = None,
 ) -> list[dict[str, str]]:
     """组装含证据的多轮 messages（供流式/同步共用）。"""
+    mode = audience or resolve_answer_audience()
     history = messages_for_llm(history_messages)
-    user_content = human_content + build_evidence_user_suffix(code_hits=code_hits)
+    user_content = human_content + build_evidence_user_suffix(
+        code_hits=code_hits,
+        audience=mode,
+    )
     return [
-        {"role": "system", "content": build_system_prompt()},
+        {"role": "system", "content": build_system_prompt(audience=mode)},
         *history,
         {"role": "user", "content": user_content},
     ]
@@ -91,9 +174,8 @@ def build_openai_messages_for_turn(
 def answer_node(state: ChatAgentState) -> dict[str, Any]:
     """同步回答：读 messages + code_hits，追加 AIMessage。"""
     cfg = get_settings()
+    audience = resolve_answer_audience(cfg)
     history_all = list(state.get("messages") or [])
-    # 最后一条 human 已在 messages 中；证据拼进「覆盖」最后一轮提示：
-    # 为避免重复，把历史去掉最后一条 human，再用带证据的 human 提问。
     history_without_last_human = history_all
     last_human = ""
     if history_all:
@@ -108,6 +190,7 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
         history_messages=history_without_last_human,
         human_content=human,
         code_hits=code_hits,
+        audience=audience,
     )
 
     errors: list[str] = list(state.get("errors") or [])
@@ -122,7 +205,10 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
             temperature=None,
             settings=cfg,
         )
-        reply = result.get("reply") or ""
+        reply = sanitize_reply_for_audience(
+            result.get("reply") or "",
+            audience=audience,
+        )
         model_key = result.get("key") or model_key
     except Exception as exc:  # noqa: BLE001
         logger.warning("gpt-sol 重试后仍失败: %s", exc)
@@ -167,5 +253,6 @@ __all__ = [
     "build_human_content",
     "build_openai_messages_for_turn",
     "build_system_prompt",
-    "_SYSTEM",
+    "sanitize_reply_for_audience",
+    "resolve_answer_audience",
 ]

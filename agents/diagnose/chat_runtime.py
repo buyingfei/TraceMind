@@ -13,6 +13,8 @@ from agents.diagnose.nodes.chat_answer import (
     build_human_content,
     build_openai_messages_for_turn,
     messages_for_llm,
+    resolve_answer_audience,
+    sanitize_reply_for_audience,
 )
 from agents.diagnose.nodes.retrieve_code import run_retrieve
 from app.core.config import get_settings
@@ -222,20 +224,23 @@ def iter_chat_turn_stream(
         "index": retrieve.get("index") or {},
     }
 
+    audience = resolve_answer_audience(cfg)
     openai_history = messages_for_llm(history_msgs)
     openai_messages = build_openai_messages_for_turn(
         history_messages=history_msgs,
         human_content=human,
         code_hits=code_hits,
+        audience=audience,
     )
 
     yield {
         "type": "meta",
         "stage": "answer",
         "key": "gpt-sol",
-        "message": "正在生成回答（记忆 + 代码证据）…",
+        "message": "正在生成回答…",
         "memory_messages": len(openai_history),
         "hit_count": len(code_hits),
+        "answer_audience": audience,
     }
 
     full_reply = ""
@@ -246,6 +251,8 @@ def iter_chat_turn_stream(
         if image_list
         else "agent:retrieve->gpt-sol+memory"
     )
+    # business：先收齐再清洗后输出，避免界面闪过代码路径
+    hold_deltas = audience == "business"
 
     for ev in llm_service.iter_chat_messages_stream_with_retry(
         messages=openai_messages,
@@ -263,10 +270,16 @@ def iter_chat_turn_stream(
                 "model": answer_model,
             }
         elif ev["type"] == "delta":
-            yield {"type": "delta", "text": ev.get("text") or ""}
+            if not hold_deltas:
+                yield {"type": "delta", "text": ev.get("text") or ""}
         elif ev["type"] == "end":
-            full_reply = ev.get("reply") or ""
+            full_reply = sanitize_reply_for_audience(
+                ev.get("reply") or "",
+                audience=audience,
+            )
             answer_key = "gpt-sol"
+            if hold_deltas and full_reply:
+                yield {"type": "delta", "text": full_reply}
         elif ev["type"] == "error":
             errors.append(f"gpt-sol: {ev.get('message')}")
             yield {
