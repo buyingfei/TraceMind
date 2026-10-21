@@ -25,6 +25,7 @@ from agents.tools.warranty_query import (
     query_warranty_by_plate,
 )
 from app.core.config import get_settings
+from app.core.logging import clip_text
 from app.services import llm_service
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,14 @@ def _execute_tool_calls(
             payload = {"ok": False, "error": str(exc)}
 
         ok = bool(payload.get("ok")) and not payload.get("error")
+        logger.info(
+            "tool done name=%s ok=%s row_count=%s err=%r args=%r",
+            name,
+            ok,
+            payload.get("row_count"),
+            clip_text(str(payload.get("error") or ""), limit=80),
+            clip_text(raw_args, limit=120),
+        )
         traces.append(
             {
                 "tool": name,
@@ -263,6 +272,15 @@ def chat_with_optional_tools(
     inferred_tyre = extract_tyre_code(turn_text, current_image_description)
     inferred_parent = extract_parent_code(turn_text, current_image_description)
     inferred_plate = extract_license_plate(turn_text, current_image_description)
+    logger.info(
+        "tool-loop start key=%s intent=%s require_sql=%s tyre=%s plate=%s tools=%s",
+        model_key,
+        intent,
+        require_sql,
+        inferred_tyre,
+        inferred_plate,
+        [t["function"]["name"] for t in tools] if tools else [],
+    )
 
     if not tools:
         result = llm_service.chat_messages_with_retry(
@@ -325,6 +343,16 @@ def chat_with_optional_tools(
                 hint += "。只用本轮胎号。"
                 working.append({"role": "user", "content": hint})
 
+        logger.info(
+            "tool-loop LLM round=%s force_final=%s tool_choice=%s",
+            round_idx,
+            force_final,
+            tool_choice if isinstance(tool_choice, str) else (
+                tool_choice.get("function", {}).get("name")
+                if isinstance(tool_choice, dict)
+                else tool_choice
+            ),
+        )
         response = _create_with_retry(
             client,
             kwargs={
@@ -352,8 +380,16 @@ def chat_with_optional_tools(
                         }
                     )
                 continue
+            reply = (msg.content or "").strip()
+            logger.info(
+                "tool-loop final key=%s used_tools=%s traces=%s preview=%r",
+                model_key,
+                bool(traces),
+                len(traces),
+                clip_text(reply, limit=100),
+            )
             return {
-                "reply": (msg.content or "").strip(),
+                "reply": reply,
                 "model": model_name,
                 "key": model_key,
                 "tool_traces": traces,

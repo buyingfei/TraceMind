@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from app.core.logging import clip_text
+
 logger = logging.getLogger(__name__)
 
 _DATA_URL_RE = re.compile(r"^data:(image/[\w.+-]+);base64,(.+)$", re.DOTALL | re.IGNORECASE)
@@ -201,7 +203,9 @@ def ocr_image(
     min_score: float = 0.5,
 ) -> dict[str, Any]:
     """对单张图做 OCR，返回拼接文本与明细。"""
+    t0 = time.perf_counter()
     img = _decode_image_to_ndarray(image)
+    h, w = int(img.shape[0]), int(img.shape[1])
     engine = get_paddle_ocr()
 
     result = None
@@ -223,9 +227,18 @@ def ocr_image(
         kept = pairs  # 全被阈值时退回全部
 
     text = "\n".join(t for t, _ in kept).strip()
+    elapsed_ms = int((time.perf_counter() - t0) * 1000)
     if not text:
+        logger.info("OCR image empty size=%sx%s ms=%s", w, h, elapsed_ms)
         raise RuntimeError("OCR 未识别到有效文字")
 
+    logger.info(
+        "OCR image ok size=%sx%s ms=%s preview=%r",
+        w,
+        h,
+        elapsed_ms,
+        clip_text(text, limit=100),
+    )
     return {
         "key": "paddleocr",
         "provider": "paddleocr",
@@ -243,6 +256,8 @@ def ocr_images(
     """多图 OCR，按图片序号拼接。"""
     if not images:
         raise ValueError("images 不能为空")
+    t0 = time.perf_counter()
+    logger.info("OCR batch start images=%s", len(images))
     blocks: list[str] = []
     all_lines: list[dict[str, Any]] = []
     for idx, image in enumerate(images, start=1):
@@ -251,6 +266,12 @@ def ocr_images(
         for line in one.get("lines") or []:
             all_lines.append({"image_index": idx, **line})
     text = "\n\n".join(blocks).strip()
+    logger.info(
+        "OCR batch done images=%s ms=%s preview=%r",
+        len(images),
+        int((time.perf_counter() - t0) * 1000),
+        clip_text(text, limit=100),
+    )
     return {
         "key": "paddleocr",
         "provider": "paddleocr",

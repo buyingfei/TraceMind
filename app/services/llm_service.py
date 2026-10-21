@@ -17,6 +17,7 @@ import httpx
 from openai import OpenAI
 
 from app.core.config import Settings, get_settings
+from app.core.logging import clip_text, summarize_messages
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +158,20 @@ def describe_images_ocr(
     from app.services import ocr_service
 
     _ = settings  # 预留阈值阈值等配置
-    result = ocr_service.ocr_images(images)
     hint = (question_hint or "").strip()
+    logger.info(
+        "OCR request images=%s hint=%r",
+        len(images or []),
+        clip_text(hint, limit=80),
+    )
+    result = ocr_service.ocr_images(images)
     if hint:
         # 仅附加到返回结构，不改 OCR 原文主体
         result = {**result, "question_hint": hint}
+    logger.info(
+        "OCR response preview=%r",
+        clip_text(result.get("reply"), limit=100),
+    )
     return result
 
 
@@ -207,17 +217,31 @@ def chat_messages(
     provider = CHAT_MODEL_CATALOG[model_key]["provider"]
     model_name = _resolve_model_name(model_key, cfg)
     client = _client_for_provider(provider)
+    logger.info(
+        "LLM call start key=%s model=%s %s",
+        model_key,
+        model_name,
+        summarize_messages(messages),
+    )
+    t0 = time.perf_counter()
     response = client.chat.completions.create(
         model=model_name,
         temperature=cfg.openai_temperature if temperature is None else temperature,
         messages=messages,
     )
-    content = response.choices[0].message.content
+    content = response.choices[0].message.content or ""
+    logger.info(
+        "LLM call done key=%s model=%s ms=%s preview=%r",
+        model_key,
+        model_name,
+        int((time.perf_counter() - t0) * 1000),
+        clip_text(content, limit=100),
+    )
     return {
         "key": model_key,
         "provider": provider,
         "model": model_name,
-        "reply": content or "",
+        "reply": content,
     }
 
 
@@ -235,6 +259,8 @@ def chat_messages_with_retry(
     last_exc: Exception | None = None
     for i in range(attempts):
         try:
+            if i > 0:
+                logger.info("LLM retry key=%s attempt=%s/%s", model_key, i + 1, attempts)
             result = chat_messages(
                 messages,
                 model_key=model_key,
@@ -448,12 +474,19 @@ def iter_chat_messages_stream(
     model_name = _resolve_model_name(model_key, cfg)
     client = _client_for_provider(provider)
 
+    logger.info(
+        "LLM stream start key=%s model=%s %s",
+        model_key,
+        model_name,
+        summarize_messages(messages),
+    )
     yield {
         "type": "start",
         "key": model_key,
         "provider": provider,
         "model": model_name,
     }
+    t0 = time.perf_counter()
     try:
         stream = client.chat.completions.create(
             model=model_name,
@@ -469,12 +502,20 @@ def iter_chat_messages_stream(
             if piece:
                 full.append(piece)
                 yield {"type": "delta", "text": piece}
+        reply = "".join(full)
+        logger.info(
+            "LLM stream done key=%s model=%s ms=%s preview=%r",
+            model_key,
+            model_name,
+            int((time.perf_counter() - t0) * 1000),
+            clip_text(reply, limit=100),
+        )
         yield {
             "type": "end",
             "key": model_key,
             "provider": provider,
             "model": model_name,
-            "reply": "".join(full),
+            "reply": reply,
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("流式调用失败 model=%s: %s", model_key, exc)

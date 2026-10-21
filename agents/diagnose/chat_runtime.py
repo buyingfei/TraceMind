@@ -21,6 +21,7 @@ from agents.diagnose.nodes.retrieve_code import run_retrieve
 from agents.diagnose.tool_loop import iter_answer_with_tools
 from agents.tools.readonly_sql import biz_readonly_enabled
 from app.core.config import get_settings
+from app.core.logging import clip_text
 from app.services import llm_service
 from app.services.checkpoint_service import thread_config
 
@@ -181,6 +182,12 @@ def iter_chat_turn_stream(
     image_list = [x for x in (images or []) if (x or "").strip()]
     image_desc = ""
     errors: list[str] = []
+    logger.info(
+        "chat turn start conversation_id=%s images=%s user=%r",
+        conversation_id,
+        len(image_list),
+        clip_text(user_text, limit=100),
+    )
 
     if image_list:
         yield {"type": "meta", "stage": "vision", "message": "正在 OCR 识别图片文字…"}
@@ -200,6 +207,7 @@ def iter_chat_turn_stream(
             }
         except Exception as exc:  # noqa: BLE001
             errors.append(f"paddleocr: {exc}")
+            logger.warning("chat turn OCR failed conversation_id=%s: %s", conversation_id, exc)
             yield {"type": "meta", "stage": "vision_failed", "error": str(exc)}
 
     human = build_human_content(user_text, image_description=image_desc)
@@ -218,6 +226,13 @@ def iter_chat_turn_stream(
     if retrieve.get("retrieve_error"):
         errors.append(f"retrieve: {retrieve['retrieve_error']}")
     path_boost = bool(retrieve.get("path_boost"))
+    logger.info(
+        "chat retrieve done conversation_id=%s hits=%s path_boost=%s queries=%s",
+        conversation_id,
+        len(code_hits),
+        path_boost,
+        len(retrieve.get("retrieve_queries") or []),
+    )
     yield {
         "type": "meta",
         "stage": "retrieve_done",
@@ -244,6 +259,13 @@ def iter_chat_turn_stream(
         require_sql=require_sql,
         user_text=user_text,
         image_description=image_desc,
+    )
+    logger.info(
+        "chat answer start conversation_id=%s audience=%s require_sql=%s memory=%s",
+        conversation_id,
+        audience,
+        require_sql,
+        len(openai_history),
     )
 
     yield {
@@ -329,6 +351,14 @@ def iter_chat_turn_stream(
         logger.exception("写 checkpoint 失败 conversation_id=%s", conversation_id)
         errors.append(f"checkpoint: {exc}")
 
+    logger.info(
+        "chat turn done conversation_id=%s pipeline=%s used_tools=%s errors=%s preview=%r",
+        conversation_id,
+        pipeline,
+        used_tools,
+        len(errors),
+        clip_text(full_reply, limit=100),
+    )
     yield {
         "type": "done",
         "key": answer_key,

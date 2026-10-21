@@ -8,6 +8,7 @@ from typing import Any
 from agents.diagnose.biz_verify import CHAIN_PATH_QUERIES, looks_like_chain_scan_scene
 from agents.diagnose.state import ChatAgentState
 from agents.tools import code_search
+from app.core.logging import clip_text
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +105,26 @@ def run_retrieve(
         image_description=image_description,
     )
     path_boost = looks_like_chain_scan_scene(user_text, image_description)
+    logger.info(
+        "retrieve start queries=%s path_boost=%s user=%r",
+        len(queries),
+        path_boost,
+        clip_text(user_text, limit=80),
+    )
     result = code_search.retrieve_for_diagnose(
         queries,
         final_top_k=10 if path_boost else 8,
         prefer_critical=path_boost,
     )
     hits = _summarize_hits(result.get("hits") or [], limit=10 if path_boost else 8)
+    top = hits[0] if hits else {}
+    logger.info(
+        "retrieve done hits=%s err=%r top=%s:%s",
+        len(hits),
+        (result.get("error") or "")[:120],
+        top.get("symbol") or "",
+        top.get("path") or "",
+    )
     return {
         "code_hits": hits,
         "retrieve_queries": result.get("queries") or queries,
