@@ -282,6 +282,8 @@ def iter_chat_turn_stream(
             model_key="gpt-sol",
             settings=cfg,
             require_sql=require_sql,
+            current_user_text=user_text,
+            current_image_description=image_desc,
         ):
             if ev.get("type") == "meta":
                 yield ev
