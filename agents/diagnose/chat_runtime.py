@@ -17,6 +17,8 @@ from agents.diagnose.nodes.chat_answer import (
     sanitize_reply_for_audience,
 )
 from agents.diagnose.nodes.retrieve_code import run_retrieve
+from agents.diagnose.tool_loop import iter_answer_with_tools
+from agents.tools.readonly_sql import biz_readonly_enabled
 from app.core.config import get_settings
 from app.services import llm_service
 from app.services.checkpoint_service import thread_config
@@ -233,64 +235,68 @@ def iter_chat_turn_stream(
         audience=audience,
     )
 
+    sql_ready = biz_readonly_enabled()
     yield {
         "type": "meta",
         "stage": "answer",
         "key": "gpt-sol",
-        "message": "正在生成回答…",
+        "message": (
+            "正在生成回答（必要时会查业务只读库核对）…"
+            if sql_ready
+            else "正在生成回答…"
+        ),
         "memory_messages": len(openai_history),
         "hit_count": len(code_hits),
         "answer_audience": audience,
+        "biz_sql_enabled": sql_ready,
     }
 
     full_reply = ""
     answer_key = "gpt-sol"
     answer_model = llm_service._resolve_model_name("gpt-sol", cfg)  # noqa: SLF001
+    used_tools = False
     pipeline = (
         "agent:ocr->retrieve->gpt-sol+memory"
         if image_list
         else "agent:retrieve->gpt-sol+memory"
     )
-    # business：先收齐再清洗后输出，避免界面闪过代码路径
-    hold_deltas = audience == "business"
 
-    for ev in llm_service.iter_chat_messages_stream_with_retry(
-        messages=openai_messages,
-        model_key="gpt-sol",
-        settings=cfg,
-    ):
-        if ev["type"] == "meta":
-            yield ev
-        elif ev["type"] == "start":
-            answer_model = ev.get("model") or answer_model
-            yield {
-                "type": "meta",
-                "stage": "answer_start",
-                "key": ev.get("key"),
-                "model": answer_model,
-            }
-        elif ev["type"] == "delta":
-            if not hold_deltas:
-                yield {"type": "delta", "text": ev.get("text") or ""}
-        elif ev["type"] == "end":
-            full_reply = sanitize_reply_for_audience(
-                ev.get("reply") or "",
-                audience=audience,
-            )
-            answer_key = "gpt-sol"
-            if hold_deltas and full_reply:
-                yield {"type": "delta", "text": full_reply}
-        elif ev["type"] == "error":
-            errors.append(f"gpt-sol: {ev.get('message')}")
-            yield {
-                "type": "error",
-                "message": str(ev.get("message") or "gpt-sol 失败"),
-            }
-            return
+    try:
+        for ev in iter_answer_with_tools(
+            openai_messages,
+            model_key="gpt-sol",
+            settings=cfg,
+        ):
+            if ev.get("type") == "meta":
+                yield ev
+            elif ev.get("type") == "end":
+                full_reply = sanitize_reply_for_audience(
+                    ev.get("reply") or "",
+                    audience=audience,
+                )
+                answer_key = ev.get("key") or "gpt-sol"
+                answer_model = ev.get("model") or answer_model
+                used_tools = bool(ev.get("used_tools"))
+                if full_reply:
+                    yield {"type": "delta", "text": full_reply}
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"gpt-sol: {exc}")
+        yield {
+            "type": "error",
+            "message": str(exc) or "gpt-sol 失败",
+        }
+        return
 
     if not full_reply and errors:
         yield {"type": "error", "message": " | ".join(errors)}
         return
+
+    if used_tools:
+        pipeline = (
+            "agent:ocr->retrieve->sql->gpt-sol+memory"
+            if image_list
+            else "agent:retrieve->sql->gpt-sol+memory"
+        )
 
     try:
         _persist_turn(
@@ -314,6 +320,7 @@ def iter_chat_turn_stream(
         "fallback": False,
         "errors": errors,
         "memory": True,
+        "used_tools": used_tools,
         "code_hits": _hit_summaries(code_hits),
         "hit_count": len(code_hits),
     }

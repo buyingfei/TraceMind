@@ -194,8 +194,14 @@ export function useChats() {
             else if (data?.stage === 'retry') {
               streamStatus.value = data?.message || '公司模型重试中…'
             }
+            else if (data?.stage === 'sql_query') {
+              streamStatus.value = data?.message || '正在查询业务只读库核对数据…'
+            }
+            else if (data?.stage === 'sql_done') {
+              streamStatus.value = data?.message || '查库完成'
+            }
             else if (data?.stage === 'answer' || data?.stage === 'answer_start') {
-              streamStatus.value = '公司模型生成中…'
+              streamStatus.value = data?.message || '公司模型生成中…'
             }
 
           } else if (event === 'delta') {

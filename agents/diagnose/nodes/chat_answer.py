@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from agents.diagnose.nodes.retrieve_code import format_code_evidence
 from agents.diagnose.state import ChatAgentState
+from agents.diagnose.tool_loop import chat_with_optional_tools
+from agents.tools.readonly_sql import biz_readonly_enabled
 from app.core.config import get_settings
 from app.services import llm_service
 
@@ -43,6 +45,9 @@ _SYSTEM_BUSINESS = (
     "用简洁中文给出业务可理解的原因说明；不要编造未出现在证据或对话中的事实。"
     "严禁在回复中出现任何代码定位信息：文件路径、.java/.xml 等扩展名、行号、"
     "类名、方法名、symbol、包名、Git 路径。"
+    "当业务事实不确定（如胎号流水、门店库存归属、是否自动入出库、单据状态等），"
+    "必须调用工具 run_readonly_sql 查询业务只读库核对后再下结论；"
+    "不要把原始 SQL、表名、字段名写进对用户的回复。"
 )
 
 _FORMAT_BUSINESS = (
@@ -51,7 +56,8 @@ _FORMAT_BUSINESS = (
     "2. 原因说明：用业务语言解释为什么会出现该现象（可提「连锁门店」「自动入出库」"
     "「库存归属转移」等，但不要提代码怎么写）\n"
     "3. 与截图对齐：若有 OCR/流水，点明对应门店与操作类型（如 K2零出→K2入库）\n"
-    "若内部证据不足，说明「依据当前信息无法完全确认」，可基于截图做有限推测并标注不确定。"
+    "若截图/对话不足以确认关键数据，先用 run_readonly_sql 查库核对；"
+    "查库后仍不足时，说明「依据当前信息无法完全确认」并标注不确定。"
 )
 
 _SYSTEM_TECHNICAL = (
@@ -59,6 +65,7 @@ _SYSTEM_TECHNICAL = (
     "结合对话历史、截图 OCR 事实与代码检索证据，用简洁中文回答；"
     "不要编造未出现在证据或对话中的事实。"
     "若有代码证据，必须在「技术依据」中引用 path:行号 或方法名。"
+    "业务数据不确定时，调用 run_readonly_sql 查只读库核对后再结论。"
 )
 
 _FORMAT_TECHNICAL = (
@@ -66,6 +73,7 @@ _FORMAT_TECHNICAL = (
     "1. 业务结论：用业务语言说明原因（是否故障/是否自动归属转移）\n"
     "2. 技术依据：引用检索到的代码（path:行号 / symbol），说明关键判断与入出库调用\n"
     "3. 与截图对齐：若有 OCR/流水，点明对应门店与操作类型（如 K2零出→K2入库）\n"
+    "数据不确定时先 run_readonly_sql 核对；"
     "若未命中代码，明确说明「未命中代码，请先完成索引」，仍可基于截图做有限推测并标注不确定。"
 )
 
@@ -196,13 +204,13 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
     errors: list[str] = list(state.get("errors") or [])
     reply = ""
     model_key = "gpt-sol"
+    used_sql = False
     pipeline = "agent:retrieve->gpt-sol+memory"
 
     try:
-        result = llm_service.chat_messages_with_retry(
+        result = chat_with_optional_tools(
             openai_messages,
             model_key="gpt-sol",
-            temperature=None,
             settings=cfg,
         )
         reply = sanitize_reply_for_audience(
@@ -210,6 +218,11 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
             audience=audience,
         )
         model_key = result.get("key") or model_key
+        used_sql = bool(result.get("used_tools"))
+        if used_sql:
+            pipeline = "agent:retrieve->sql->gpt-sol+memory"
+        elif biz_readonly_enabled():
+            pipeline = "agent:retrieve->gpt-sol+tools+memory"
     except Exception as exc:  # noqa: BLE001
         logger.warning("gpt-sol 重试后仍失败: %s", exc)
         errors.append(f"gpt-sol: {exc}")

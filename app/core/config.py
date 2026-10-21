@@ -97,6 +97,22 @@ class Settings(BaseSettings):
         description="business | technical",
     )
 
+    # 业务只读库（模型核对数据用；勿与本系统 MySQL 混用）
+    biz_readonly_database_url: str = Field(
+        default="",
+        description="SQLAlchemy URL，如 mysql+pymysql://user:pass@host:3306/db?charset=utf8mb4",
+    )
+    biz_readonly_sql_enabled: bool = Field(
+        default=True,
+        description="是否允许模型调用只读 SQL 工具",
+    )
+    biz_readonly_max_rows: int = Field(default=30, description="单次查询最大返回行数")
+    biz_readonly_timeout_sec: int = Field(default=15, description="单次查询超时秒数")
+    agent_max_tool_rounds: int = Field(
+        default=3,
+        description="单轮对话最多工具调用轮数（查库等）",
+    )
+
     @property
     def milvus_uri(self) -> str:
         return self.diagnose_milvus_uri
