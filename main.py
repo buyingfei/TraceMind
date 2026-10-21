@@ -17,7 +17,7 @@ def main() -> None:
         "app.main:app",
         host=settings.app_host,
         port=settings.app_port,
-        reload=settings.app_env == "local",
+        # reload=settings.app_env == "local",
     )
 
 
