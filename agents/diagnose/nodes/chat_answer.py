@@ -8,7 +8,11 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from agents.diagnose.biz_verify import needs_biz_sql_verify, sql_cookbook_suffix
+from agents.diagnose.biz_verify import (
+    detect_biz_intent,
+    needs_biz_sql_verify,
+    sql_cookbook_suffix,
+)
 from agents.diagnose.nodes.retrieve_code import format_code_evidence
 from agents.diagnose.state import ChatAgentState
 from agents.diagnose.tool_loop import chat_with_optional_tools
@@ -52,8 +56,8 @@ _SYSTEM_BUSINESS = (
     "最终回复严禁出现：文件路径、.java/.xml 等扩展名、行号、类名、方法名、"
     "symbol、包名、Git 路径、原始 SQL、表名、字段名。"
     "涉及胎号流水、门店入出库、连锁归属、是否自动入出库时："
-    "必须先调用 run_readonly_sql 查业务只读库核对（尤其 is_auto），再下结论；"
-    "查库失败须明确说明未能用库核对。"
+    "必须先调用 query_scan_tyre_records 按分表查扫码明细核对 is_auto，再下结论；"
+    "禁止查逻辑表 t_scan_store_record_tyre；查库失败须明确说明未能用库核对。"
 )
 
 _FORMAT_BUSINESS = (
@@ -70,7 +74,7 @@ _SYSTEM_TECHNICAL = (
     "结合对话历史、截图 OCR 事实与代码检索证据，用简洁中文回答；"
     "不要编造未出现在证据或对话中的事实。"
     "若有代码证据，必须在「技术依据」中引用 path:行号 或方法名。"
-    "涉及胎号/门店入出库时，必须先 run_readonly_sql 查只读库（含 is_auto）再结论。"
+    "涉及胎号/门店入出库时，必须先 query_scan_tyre_records 查分表明细（含 is_auto）再结论。"
 )
 
 _FORMAT_TECHNICAL = (
@@ -125,10 +129,13 @@ def build_evidence_user_suffix(
     code_hits: list[dict[str, Any]] | None,
     audience: str | None = None,
     require_sql: bool = False,
+    user_text: str = "",
+    image_description: str = "",
 ) -> str:
     """检索证据注入：过程可用完整代码；business 仅约束最终回复不复述定位。"""
     hits = code_hits or []
     mode = audience or resolve_answer_audience()
+    intent = detect_biz_intent(user_text, image_description)
     parts: list[str] = []
 
     if mode == "technical":
@@ -148,10 +155,22 @@ def build_evidence_user_suffix(
         )
 
     if require_sql and biz_readonly_enabled():
-        parts.append(sql_cookbook_suffix())
-        parts.append(
-            "\n\n【硬性要求】本题必须先调用 run_readonly_sql 查库核对后再写最终回答。"
-        )
+        parts.append(sql_cookbook_suffix(intent=intent))
+        if intent == "warranty_plate":
+            parts.append(
+                "\n\n【硬性要求】本题按车牌查质保：必须先调用 query_warranty_by_plate；"
+                "禁止使用上一轮对话的胎号，禁止先查扫码流水。"
+            )
+        elif intent == "scan_tyre":
+            parts.append(
+                "\n\n【硬性要求】本题查扫码流水：必须先调用 query_scan_tyre_records；"
+                "只用本轮胎号，禁止沿用上一轮胎号。"
+            )
+        else:
+            parts.append(
+                "\n\n【硬性要求】本题必须先查业务只读库核对后再写最终回答；"
+                "只用本轮用户给出的业务键，禁止沿用上一轮对话实体。"
+            )
 
     return "".join(parts)
 
@@ -196,6 +215,8 @@ def build_openai_messages_for_turn(
         code_hits=code_hits,
         audience=mode,
         require_sql=bool(must_sql and biz_readonly_enabled()),
+        user_text=user_text or human_content,
+        image_description=image_description,
     )
     return [
         {"role": "system", "content": build_system_prompt(audience=mode)},
@@ -244,6 +265,8 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
             model_key="gpt-sol",
             settings=cfg,
             require_sql=require_sql,
+            current_user_text=user_text,
+            current_image_description=image_description,
         )
         reply = sanitize_reply_for_audience(
             result.get("reply") or "",

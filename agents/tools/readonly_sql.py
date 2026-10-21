@@ -151,10 +151,10 @@ READONLY_SQL_TOOL = {
     "function": {
         "name": "run_readonly_sql",
         "description": (
-            "查询业务只读库（cn_wintogether_db）以核对数据。仅可执行 SELECT/WITH 查询。"
-            "胎号/门店入出库类问题必须使用；重点核对接扫码明细的 is_auto、门店、时间。"
-            "扫码胎号在分表 t_scan_store_record_tyre_0..N；不确定列名先查 information_schema。"
-            "不要用于改数；不要无 LIMIT 扫全表，优先加 TYRE_CODE 等条件。"
+            "通用只读 SQL（SELECT/WITH）。"
+            "查门店扫码胎号明细请改用 query_scan_tyre_records（自动分表）；"
+            "禁止查逻辑表 t_scan_store_record_tyre（直连会 0 行）。"
+            "本工具用于连锁关系、门店信息等其他核对；不要用于改数。"
         ),
         "parameters": {
             "type": "object",
