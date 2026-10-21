@@ -1,4 +1,4 @@
-"""两轮对话记忆冒烟：同 thread 第二轮应能引用第一轮事实。"""
+﻿"""两轮对话记忆冒烟：同 thread 第二轮应能引用第一轮事实。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ os.environ.setdefault(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from agents.diagnose.chat_runtime import _snapshot_messages, run_chat_turn  # noqa: E402
-from agents.diagnose.graph import reset_chat_graph  # noqa: E402
+from app.agents.diagnose.chat_runtime import _snapshot_messages, run_chat_turn  # noqa: E402
+from app.agents.diagnose.graph import reset_chat_graph  # noqa: E402
 from app.services.checkpoint_service import ensure_checkpoint_ready, get_checkpointer  # noqa: E402
 
 

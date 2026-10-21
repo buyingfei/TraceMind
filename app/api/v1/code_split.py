@@ -9,7 +9,7 @@ router = APIRouter(prefix="/code-split", tags=["code-split"])
 
 @router.get("/preview")
 def preview_from_config() -> dict:
-    """按 config/code_index.yaml 中的 preview.file 切割，返回完整结果供查看。"""
+    """按 app/core/code_index.yaml（Settings.code_index_config_path）中的 preview.file 切割。"""
     try:
         return split_preview_from_config()
     except FileNotFoundError as exc:

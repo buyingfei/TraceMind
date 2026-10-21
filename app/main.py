@@ -34,7 +34,15 @@ async def lifespan(_app: FastAPI):
             logger.info("OCR warmup: %s", ocr_info)
         except Exception:  # noqa: BLE001
             logger.exception("OCR 预热失败（带图对话首请求仍可能较慢）")
-    yield
+    try:
+        yield
+    finally:
+        try:
+            from app.infra.db import dispose_engine
+
+            dispose_engine()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 app = FastAPI(
@@ -67,3 +75,19 @@ def root() -> dict[str, str]:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def run() -> None:
+    """本地启动：python -m app.main"""
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        # reload=settings.app_env == "local",
+    )
+
+
+if __name__ == "__main__":
+    run()

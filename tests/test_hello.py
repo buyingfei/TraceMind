@@ -1,8 +1,8 @@
-"""Hello World 骨架测试。"""
+﻿"""Hello World 骨架测试。"""
 
 from fastapi.testclient import TestClient
 
-from agents.diagnose.graph import run_hello_graph
+from app.agents.diagnose.graph import run_hello_graph
 from app.main import app
 
 client = TestClient(app)

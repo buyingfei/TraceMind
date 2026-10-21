@@ -1,10 +1,5 @@
-"""Repository 基类占位。"""
+"""兼容层：请改用 app.db.repositories。"""
 
-from app.core.exceptions import NotImplementedCapabilityError
+from app.db.repositories.ticket import TicketRepository
 
-
-class TicketRepository:
-    """工单仓储（骨架占位）。"""
-
-    def create(self, *args, **kwargs):
-        raise NotImplementedCapabilityError("TicketRepository.create")
+__all__ = ["TicketRepository"]

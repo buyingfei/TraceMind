@@ -41,7 +41,13 @@ class CodeChunk:
 
 
 def load_code_index_config(config_path: str | Path | None = None) -> dict[str, Any]:
-    path = Path(config_path or Path.cwd() / "config" / "code_index.yaml")
+    """加载索引切块 YAML；默认路径来自 Settings.code_index_config_path。"""
+    if config_path is None:
+        from app.core.config import get_settings
+
+        path = get_settings().resolve_code_index_config_path()
+    else:
+        path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
     with path.open("r", encoding="utf-8") as f:

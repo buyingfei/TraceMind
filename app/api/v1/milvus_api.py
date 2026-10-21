@@ -22,7 +22,7 @@ class EnsureCollectionRequest(BaseModel):
 class IndexPreviewRequest(BaseModel):
     relative_path: str | None = Field(
         default=None,
-        description="相对仓库路径；为空则使用 config/code_index.yaml 的 preview.file",
+        description="相对仓库路径；为空则使用 code_index.yaml 的 preview.file",
     )
     recreate_collection: bool = Field(
         default=False,

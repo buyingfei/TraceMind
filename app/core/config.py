@@ -1,15 +1,33 @@
 """应用配置。"""
 
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _project_root() -> Path:
+    # app/core/config.py → 项目根
+    return Path(__file__).resolve().parents[2]
+
+
+def _app_dir() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_env_files() -> tuple[str, ...]:
+    """优先 app/.env，其次仓库根 .env（兼容旧布局）。"""
+    files: list[str] = []
+    for path in (_app_dir() / ".env", _project_root() / ".env"):
+        files.append(str(path))
+    return tuple(files)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_default_env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -74,6 +92,12 @@ class Settings(BaseSettings):
 
     # 对话图片本地目录（相对项目根）
     chat_upload_dir: str = Field(default="data/chat_uploads")
+
+    # 代码索引 / Tree-sitter 切块策略（YAML；本机仓库路径等放文件内）
+    code_index_config_path: str = Field(
+        default="app/core/code_index.yaml",
+        description="相对项目根或绝对路径；可用环境变量 CODE_INDEX_CONFIG_PATH 覆盖",
+    )
 
     # 启动时预热 PaddleOCR（加载模型 + 一次小图推理）
     ocr_warmup_on_startup: bool = Field(
@@ -143,6 +167,12 @@ class Settings(BaseSettings):
             f"@{self.mysql_host}:{self.mysql_port}/{database}"
             f"?charset={self.mysql_charset}"
         )
+
+    def resolve_code_index_config_path(self) -> Path:
+        path = Path(self.code_index_config_path)
+        if not path.is_absolute():
+            path = _project_root() / path
+        return path.resolve()
 
 
 @lru_cache

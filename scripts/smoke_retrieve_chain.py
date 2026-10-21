@@ -1,4 +1,4 @@
-"""连锁自动入库：检索 + 回答冒烟（文本模拟 OCR，可不贴真图）。"""
+﻿"""连锁自动入库：检索 + 回答冒烟（文本模拟 OCR，可不贴真图）。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from agents.diagnose.chat_runtime import run_chat_turn  # noqa: E402
-from agents.diagnose.graph import reset_chat_graph  # noqa: E402
-from agents.diagnose.nodes.retrieve_code import run_retrieve  # noqa: E402
+from app.agents.diagnose.chat_runtime import run_chat_turn  # noqa: E402
+from app.agents.diagnose.graph import reset_chat_graph  # noqa: E402
+from app.agents.diagnose.nodes.retrieve_code import run_retrieve  # noqa: E402
 from app.services.checkpoint_service import ensure_checkpoint_ready, get_checkpointer  # noqa: E402
 
 OCR_FAKE = """
@@ -59,9 +59,9 @@ def main() -> None:
         print("delete_thread", type(exc).__name__, exc)
 
     # 不走真 OCR：直接把 OCR 文本塞进 user（模拟 build_human_content）
-    from agents.diagnose.nodes.chat_answer import build_human_content
+    from app.agents.diagnose.nodes.chat_answer import build_human_content
     from langchain_core.messages import HumanMessage
-    from agents.diagnose.graph import get_chat_graph
+    from app.agents.diagnose.graph import get_chat_graph
     from app.services.checkpoint_service import thread_config
 
     human = build_human_content(QUESTION, image_description=OCR_FAKE)

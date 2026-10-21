@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import get_settings
-from app.db.session import ping_database
+from app.infra.db import ping_database
 
 router = APIRouter(prefix="/db", tags=["db"])
 

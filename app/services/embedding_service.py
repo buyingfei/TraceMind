@@ -14,7 +14,7 @@ import struct
 import httpx
 
 from app.core.config import Settings, get_settings
-from app.services.llm_service import get_openai_client
+from app.infra.llm import get_openai_client
 
 
 def _local_hash_embedding(text: str, dim: int) -> list[float]:

@@ -10,16 +10,23 @@ import logging
 import re
 import time
 from collections.abc import Iterator
-from functools import lru_cache
 from typing import Any
 
 import httpx
-from openai import OpenAI
 
+from app.common.text import clip_text, summarize_messages
 from app.core.config import Settings, get_settings
-from app.core.logging import clip_text, summarize_messages
+from app.infra.llm import (
+    client_for_provider,
+    get_ollama_openai_client,
+    get_openai_client,
+)
+
 
 logger = logging.getLogger(__name__)
+
+# 兼容旧调用方
+_client_for_provider = client_for_provider
 
 # 逻辑模型 key -> 配置（provider + 真实模型名）
 CHAT_MODEL_CATALOG: dict[str, dict[str, str]] = {
@@ -62,35 +69,6 @@ def list_chat_models(*, settings: Settings | None = None) -> list[dict[str, Any]
             }
         )
     return items
-
-
-@lru_cache
-def get_openai_client() -> OpenAI:
-    settings = get_settings()
-    if not settings.openai_api_key:
-        raise RuntimeError("未配置 OPENAI_API_KEY，请写入 .env")
-    return OpenAI(
-        api_key=settings.openai_api_key,
-        base_url=settings.normalized_openai_base_url(),
-    )
-
-
-@lru_cache
-def get_ollama_openai_client() -> OpenAI:
-    """Ollama 的 OpenAI 兼容接口（/v1）。"""
-    settings = get_settings()
-    base = settings.ollama_base_url.rstrip("/")
-    if not base.endswith("/v1"):
-        base = f"{base}/v1"
-    return OpenAI(api_key="ollama", base_url=base)
-
-
-def _client_for_provider(provider: str) -> OpenAI:
-    if provider == "openai":
-        return get_openai_client()
-    if provider == "ollama":
-        return get_ollama_openai_client()
-    raise ValueError(f"不支持的 provider: {provider}")
 
 
 def normalize_image_input(image: str) -> tuple[str, str]:

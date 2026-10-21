@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db.models import CodeChunkMeta, CodeIndexVersion, CodeRepo
-from app.db.session import get_session_factory
+from app.infra.db import get_session_factory
 from app.services import milvus_service
 from app.services.treesitter_java_splitter import (
     load_code_index_config,

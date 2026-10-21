@@ -1,20 +1,11 @@
-"""Hello World 接口：演示 FastAPI + LangGraph（无模型）。"""
+﻿"""Hello World 接口：演示 FastAPI + LangGraph（无模型）。"""
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
 
-from agents.diagnose.graph import run_hello_graph
+from app.agents.diagnose.graph import run_hello_graph
+from app.schemas.hello import HelloRequest, HelloResponse
 
 router = APIRouter()
-
-
-class HelloRequest(BaseModel):
-    name: str = Field(default="World", description="打招呼对象")
-
-
-class HelloResponse(BaseModel):
-    message: str
-    graph: str = "diagnose.hello"
 
 
 @router.get("/hello", response_model=HelloResponse)
