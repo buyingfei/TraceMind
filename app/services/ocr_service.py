@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -86,6 +87,50 @@ def get_paddle_ocr():
         except (TypeError, ValueError):
             continue
     raise RuntimeError("无法初始化 PaddleOCR")
+
+
+def _run_engine_once(engine: Any, img: np.ndarray) -> None:
+    """跑一次推理以预热底层算子（忽略识别结果）。"""
+    if hasattr(engine, "predict"):
+        try:
+            engine.predict(img)
+            return
+        except TypeError:
+            pass
+    if hasattr(engine, "ocr"):
+        try:
+            engine.ocr(img, cls=True)
+        except TypeError:
+            engine.ocr(img)
+
+
+def warmup_ocr(*, run_infer: bool = True) -> dict[str, Any]:
+    """启动时预热：加载模型，可选对小图跑一次推理。"""
+    t0 = time.perf_counter()
+    engine = get_paddle_ocr()
+    load_ms = int((time.perf_counter() - t0) * 1000)
+
+    infer_ms = 0
+    if run_infer:
+        t1 = time.perf_counter()
+        # 带少量文字的小图，触发 det+rec 路径
+        img = np.full((64, 256, 3), 255, dtype=np.uint8)
+        img[20:44, 20:236] = 0
+        try:
+            _run_engine_once(engine, img)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OCR 预热推理失败（模型已加载）: %s", exc)
+        infer_ms = int((time.perf_counter() - t1) * 1000)
+
+    total_ms = int((time.perf_counter() - t0) * 1000)
+    info = {
+        "status": "ok",
+        "load_ms": load_ms,
+        "infer_ms": infer_ms,
+        "total_ms": total_ms,
+    }
+    logger.info("OCR warmup done: %s", info)
+    return info
 
 
 def _as_mapping(page: Any) -> dict[str, Any]:

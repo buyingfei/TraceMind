@@ -191,8 +191,11 @@ export function useChats() {
                   ? `检索完成，命中 ${data?.hit_count ?? 0} 条代码`
                   : '正在检索代码…')
             }
+            else if (data?.stage === 'fallback') {
+              streamStatus.value = data?.message || '切换备用模型…'
+            }
             else if (data?.stage === 'answer' || data?.stage === 'answer_start') {
-              streamStatus.value = data.fallback ? 'gpt-sol 生成中…' : '回答生成中…'
+              streamStatus.value = data.fallback ? '千问生成中…' : '公司模型生成中…'
             }
           } else if (event === 'delta') {
             if (!streamBubble) {

@@ -24,6 +24,16 @@ async def lifespan(_app: FastAPI):
         logger.info("checkpoint ready: %s", info)
     except Exception:  # noqa: BLE001
         logger.exception("LangGraph checkpoint 初始化失败（对话记忆不可用）")
+
+    if settings.ocr_warmup_on_startup:
+        try:
+            from app.services.ocr_service import warmup_ocr
+
+            # 同步预热：保证首条带图请求不再冷加载模型
+            ocr_info = warmup_ocr(run_infer=True)
+            logger.info("OCR warmup: %s", ocr_info)
+        except Exception:  # noqa: BLE001
+            logger.exception("OCR 预热失败（带图对话首请求仍可能较慢）")
     yield
 
 

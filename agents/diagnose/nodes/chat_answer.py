@@ -112,33 +112,33 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
 
     errors: list[str] = list(state.get("errors") or [])
     reply = ""
-    model_key = "qwen2.5-7b"
-    pipeline = "agent:retrieve->qwen2.5-7b+memory"
+    model_key = "gpt-sol"
+    pipeline = "agent:retrieve->gpt-sol+memory"
 
     try:
         result = llm_service.chat_messages(
             openai_messages,
-            model_key="qwen2.5-7b",
+            model_key="gpt-sol",
             temperature=None,
             settings=cfg,
         )
         reply = result.get("reply") or ""
         model_key = result.get("key") or model_key
     except Exception as exc:  # noqa: BLE001
-        logger.warning("qwen 失败，尝试 gpt-sol: %s", exc)
-        errors.append(f"qwen2.5-7b: {exc}")
+        logger.warning("gpt-sol 失败，尝试 qwen2.5-7b: %s", exc)
+        errors.append(f"gpt-sol: {exc}")
         try:
             result = llm_service.chat_messages(
                 openai_messages,
-                model_key="gpt-sol",
+                model_key="qwen2.5-7b",
                 temperature=None,
                 settings=cfg,
             )
             reply = result.get("reply") or ""
-            model_key = "gpt-sol"
-            pipeline = "agent:retrieve->fallback:gpt-sol+memory"
+            model_key = "qwen2.5-7b"
+            pipeline = "agent:retrieve->fallback:qwen2.5-7b+memory"
         except Exception as exc2:  # noqa: BLE001
-            errors.append(f"gpt-sol: {exc2}")
+            errors.append(f"qwen2.5-7b: {exc2}")
             reply = f"模型调用失败：{exc2}"
             pipeline = "agent:failed"
 

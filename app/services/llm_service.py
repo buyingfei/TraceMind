@@ -1,6 +1,6 @@
-"""多模型聊天：OpenAI 网关 gpt-sol + 本地 Ollama qwen2.5-7b。
+"""多模型聊天：OpenAI 网关 gpt-sol（优先）+ 本地 Ollama qwen2.5-7b（兜底）。
 
-带图链路：PaddleOCR 识字 → qwen2.5-7b 综合回答；OCR 与 qwen 都失败则 gpt-sol 兜底。
+带图链路：PaddleOCR 识字 → gpt-sol 综合回答；失败则 qwen2.5-7b。
 """
 
 from __future__ import annotations
@@ -232,10 +232,10 @@ def chat_with_pipeline(
 
     有图片时：
       1) PaddleOCR 识别文字
-      2) OCR 文本 + 原始问题 → qwen2.5-7b
-      3) OCR 与 qwen 都失败 → gpt-sol 兜底
+      2) OCR 文本 + 原始问题 → gpt-sol（公司模型）
+      3) 失败 → qwen2.5-7b 兜底
 
-    无图片时：优先 qwen2.5-7b，失败再 gpt-sol。
+    无图片时：优先 gpt-sol，失败再 qwen2.5-7b。
     """
     cfg = settings or get_settings()
     system = system_message or "你是 diagnose-agent 助手，用简洁中文回答。"
@@ -243,12 +243,10 @@ def chat_with_pipeline(
     steps: list[dict[str, Any]] = []
     errors: list[str] = []
 
-    # ---------- 有图：OCR → qwen ----------
-    if image_list:
-        image_desc = ""
-        ocr_ok = False
-        qwen_ok = False
+    answer_prompt = user_message
+    image_desc = ""
 
+    if image_list:
         try:
             vision = describe_images_ocr(
                 image_list,
@@ -256,7 +254,6 @@ def chat_with_pipeline(
                 settings=cfg,
             )
             image_desc = vision["reply"]
-            ocr_ok = True
             steps.append(
                 {
                     "step": "ocr",
@@ -271,131 +268,70 @@ def chat_with_pipeline(
             errors.append(f"paddleocr: {exc}")
             steps.append({"step": "ocr", "ok": False, "error": str(exc)})
 
-        qwen_prompt = (
+        answer_prompt = (
             "下面是图片 OCR 识别出的文字与用户原始问题，请综合回答用户问题。"
             "请以 OCR 文字为准，不要编造图中不存在的内容。\n\n"
             f"【图片OCR文字】\n{image_desc or '（OCR失败，仅根据文字问题作答）'}\n\n"
             f"【用户问题】\n{user_message.strip() or '（用户未提供文字，请根据OCR文字总结）'}"
         )
-        try:
-            qwen = _chat_text(
-                model_key="qwen2.5-7b",
-                user_message=qwen_prompt,
-                system_message=system,
-                temperature=temperature,
-                settings=cfg,
-            )
-            qwen_ok = True
-            steps.append(
-                {
-                    "step": "answer",
-                    "ok": True,
-                    "key": qwen["key"],
-                    "model": qwen["model"],
-                }
-            )
-            return {
-                "key": qwen["key"],
-                "provider": qwen["provider"],
-                "model": qwen["model"],
-                "reply": qwen["reply"],
-                "pipeline": "paddleocr->qwen2.5-7b",
-                "image_description": image_desc,
-                "fallback": False,
-                "steps": steps,
-                "errors": errors,
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("qwen2.5-7b 调用失败: %s", exc)
-            errors.append(f"qwen2.5-7b: {exc}")
-            steps.append({"step": "answer", "ok": False, "error": str(exc)})
 
-        both_local_failed = (not ocr_ok) and (not qwen_ok)
-        if both_local_failed:
-            fallback_prompt = (
-                f"{user_message.strip() or '请根据上下文回答。'}\n"
-                f"（用户附带了 {len(image_list)} 张图片；本地 OCR 与 qwen2.5-7b 均不可用。）"
-            )
-            pipeline_name = "fallback:gpt-sol(both-local-failed)"
-        else:
-            fallback_prompt = (
-                "下面是图片 OCR 文字与用户原始问题，请综合回答用户问题。"
-                "请以 OCR 文字为准。\n\n"
-                f"【图片OCR文字】\n{image_desc or '（无）'}\n\n"
-                f"【用户问题】\n{user_message.strip() or '（无文字）'}"
-            )
-            pipeline_name = "fallback:gpt-sol(after-qwen-failed)"
-
-        try:
-            sol = _chat_text(
-                model_key="gpt-sol",
-                user_message=fallback_prompt,
-                system_message=system,
-                temperature=temperature,
-                settings=cfg,
-            )
-            steps.append(
-                {
-                    "step": "fallback",
-                    "ok": True,
-                    "key": sol["key"],
-                    "model": sol["model"],
-                    "both_local_failed": both_local_failed,
-                }
-            )
-            return {
-                "key": sol["key"],
-                "provider": sol["provider"],
-                "model": sol["model"],
-                "reply": sol["reply"],
-                "pipeline": pipeline_name,
-                "image_description": image_desc,
-                "fallback": True,
-                "steps": steps,
-                "errors": errors,
-            }
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"gpt-sol: {exc}")
-            steps.append({"step": "fallback", "ok": False, "error": str(exc)})
-            raise RuntimeError("本地模型与 gpt-sol 均调用失败: " + " | ".join(errors)) from exc
-    # ---------- 无图：qwen → gpt-sol ----------
     try:
-        qwen = _chat_text(
-            model_key="qwen2.5-7b",
-            user_message=user_message,
+        sol = _chat_text(
+            model_key="gpt-sol",
+            user_message=answer_prompt,
             system_message=system,
             temperature=temperature,
             settings=cfg,
         )
-        steps.append({"step": "answer", "ok": True, "key": qwen["key"], "model": qwen["model"]})
+        steps.append(
+            {"step": "answer", "ok": True, "key": sol["key"], "model": sol["model"]}
+        )
         return {
-            **qwen,
-            "pipeline": "qwen2.5-7b",
-            "image_description": "",
+            "key": sol["key"],
+            "provider": sol["provider"],
+            "model": sol["model"],
+            "reply": sol["reply"],
+            "pipeline": "paddleocr->gpt-sol" if image_list else "gpt-sol",
+            "image_description": image_desc,
             "fallback": False,
             "steps": steps,
             "errors": errors,
         }
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"qwen2.5-7b: {exc}")
+        logger.warning("gpt-sol 调用失败: %s", exc)
+        errors.append(f"gpt-sol: {exc}")
         steps.append({"step": "answer", "ok": False, "error": str(exc)})
 
-    sol = _chat_text(
-        model_key="gpt-sol",
-        user_message=user_message,
-        system_message=system,
-        temperature=temperature,
-        settings=cfg,
-    )
-    steps.append({"step": "fallback", "ok": True, "key": sol["key"], "model": sol["model"]})
-    return {
-        **sol,
-        "pipeline": "fallback:gpt-sol",
-        "image_description": "",
-        "fallback": True,
-        "steps": steps,
-        "errors": errors,
-    }
+    try:
+        qwen = _chat_text(
+            model_key="qwen2.5-7b",
+            user_message=answer_prompt,
+            system_message=system,
+            temperature=temperature,
+            settings=cfg,
+        )
+        steps.append(
+            {"step": "fallback", "ok": True, "key": qwen["key"], "model": qwen["model"]}
+        )
+        return {
+            "key": qwen["key"],
+            "provider": qwen["provider"],
+            "model": qwen["model"],
+            "reply": qwen["reply"],
+            "pipeline": (
+                "fallback:qwen2.5-7b(after-gpt-sol-failed)"
+                if image_list
+                else "fallback:qwen2.5-7b"
+            ),
+            "image_description": image_desc,
+            "fallback": True,
+            "steps": steps,
+            "errors": errors,
+        }
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"qwen2.5-7b: {exc}")
+        steps.append({"step": "fallback", "ok": False, "error": str(exc)})
+        raise RuntimeError("gpt-sol 与 qwen2.5-7b 均调用失败: " + " | ".join(errors)) from exc
 
 
 def iter_chat_text_stream(
@@ -490,7 +426,6 @@ def iter_pipeline_stream(
     image_list = [x for x in (images or []) if (x or "").strip()]
     errors: list[str] = []
     image_desc = ""
-    ocr_ok = False
 
     if image_list:
         yield {"type": "meta", "stage": "vision", "message": "正在 OCR 识别图片文字…"}
@@ -501,7 +436,6 @@ def iter_pipeline_stream(
                 settings=cfg,
             )
             image_desc = vision["reply"]
-            ocr_ok = True
             yield {
                 "type": "meta",
                 "stage": "vision_done",
@@ -526,16 +460,16 @@ def iter_pipeline_stream(
     else:
         answer_prompt = user_message
 
-    yield {"type": "meta", "stage": "answer", "key": "qwen2.5-7b", "message": "正在生成回答…"}
-    qwen_ok = False
+    yield {"type": "meta", "stage": "answer", "key": "gpt-sol", "message": "正在生成回答…"}
+    primary_ok = False
     full_reply = ""
-    answer_key = "qwen2.5-7b"
-    answer_model = _resolve_model_name("qwen2.5-7b", cfg)
+    answer_key = "gpt-sol"
+    answer_model = _resolve_model_name("gpt-sol", cfg)
     fallback = False
-    pipeline = "qwen2.5-7b" if not image_list else "paddleocr->qwen2.5-7b"
+    pipeline = "gpt-sol" if not image_list else "paddleocr->gpt-sol"
 
     for ev in iter_chat_text_stream(
-        model_key="qwen2.5-7b",
+        model_key="gpt-sol",
         user_message=answer_prompt,
         system_message=system,
         temperature=temperature,
@@ -552,53 +486,40 @@ def iter_pipeline_stream(
         elif ev["type"] == "delta":
             yield {"type": "delta", "text": ev.get("text") or ""}
         elif ev["type"] == "end":
-            qwen_ok = True
+            primary_ok = True
             full_reply = ev.get("reply") or ""
-            answer_key = "qwen2.5-7b"
+            answer_key = "gpt-sol"
         elif ev["type"] == "error":
-            errors.append(f"qwen2.5-7b: {ev.get('message')}")
+            errors.append(f"gpt-sol: {ev.get('message')}")
 
-    if not qwen_ok:
-        both_local_failed = (not ocr_ok) if image_list else True
-        if image_list and both_local_failed:
-            fallback_prompt = (
-                f"{user_message.strip() or '请根据上下文回答。'}\n"
-                f"（用户附带了 {len(image_list)} 张图片；本地 OCR 与 qwen2.5-7b 均不可用。）"
-            )
-            pipeline = "fallback:gpt-sol(both-local-failed)"
-        elif image_list:
-            fallback_prompt = (
-                "下面是图片 OCR 文字与用户原始问题，请综合回答用户问题。请以 OCR 文字为准。\n\n"
-                f"【图片OCR文字】\n{image_desc or '（无）'}\n\n"
-                f"【用户问题】\n{user_message.strip() or '（无文字）'}"
-            )
-            pipeline = "fallback:gpt-sol(after-qwen-failed)"
-        else:
-            fallback_prompt = user_message
-            pipeline = "fallback:gpt-sol"
-
+    if not primary_ok:
+        pipeline = (
+            "fallback:qwen2.5-7b(after-gpt-sol-failed)"
+            if image_list
+            else "fallback:qwen2.5-7b"
+        )
         yield {
             "type": "meta",
             "stage": "fallback",
-            "key": "gpt-sol",
-            "message": "本地模型不可用，切换 gpt-sol…",
+            "key": "qwen2.5-7b",
+            "message": "公司模型不可用，切换本地千问…",
         }
         full_reply = ""
         for ev in iter_chat_text_stream(
-            model_key="gpt-sol",
-            user_message=fallback_prompt,
+            model_key="qwen2.5-7b",
+            user_message=answer_prompt,
             system_message=system,
             temperature=temperature,
             settings=cfg,
         ):
             if ev["type"] == "start":
-                answer_key = "gpt-sol"
-                answer_model = ev.get("model") or _resolve_model_name("gpt-sol", cfg)
+                answer_key = "qwen2.5-7b"
+                answer_model = ev.get("model") or _resolve_model_name("qwen2.5-7b", cfg)
                 fallback = True
                 yield {
                     "type": "meta",
                     "stage": "answer_start",
-                    "key": "gpt-sol",
+                    "key": "qwen2.5-7b",
                     "model": answer_model,
                     "fallback": True,
                 }
@@ -606,11 +527,14 @@ def iter_pipeline_stream(
                 yield {"type": "delta", "text": ev.get("text") or ""}
             elif ev["type"] == "end":
                 full_reply = ev.get("reply") or ""
-                answer_key = "gpt-sol"
+                answer_key = "qwen2.5-7b"
                 fallback = True
             elif ev["type"] == "error":
-                errors.append(f"gpt-sol: {ev.get('message')}")
-                yield {"type": "error", "message": str(ev.get("message") or "gpt-sol 失败")}
+                errors.append(f"qwen2.5-7b: {ev.get('message')}")
+                yield {
+                    "type": "error",
+                    "message": str(ev.get("message") or "qwen2.5-7b 失败"),
+                }
                 return
 
     if not full_reply and errors:

@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # 对话图片本地目录（相对项目根）
     chat_upload_dir: str = Field(default="data/chat_uploads")
 
+    # 启动时预热 PaddleOCR（加载模型 + 一次小图推理）
+    ocr_warmup_on_startup: bool = Field(
+        default=True,
+        description="应用启动时预热 OCR，避免首条带图消息冷启动过慢",
+    )
+
     # LangGraph Checkpointer（Postgres，与 MySQL 聊天库分离）
     langgraph_database_url: str = Field(
         default="postgresql://postgres:123456@127.0.0.1:5432/langgraph_mem",

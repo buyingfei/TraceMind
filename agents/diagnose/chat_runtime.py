@@ -149,16 +149,16 @@ def run_chat_turn(
     code_hits = list(result.get("code_hits") or [])
     return {
         "reply": result.get("reply") or "",
-        "key": result.get("model_key") or "qwen2.5-7b",
+        "key": result.get("model_key") or "gpt-sol",
         "model": llm_service._resolve_model_name(  # noqa: SLF001
-            result.get("model_key") or "qwen2.5-7b", cfg
+            result.get("model_key") or "gpt-sol", cfg
         ),
         "provider": llm_service.CHAT_MODEL_CATALOG.get(
-            result.get("model_key") or "qwen2.5-7b", {}
-        ).get("provider", "ollama"),
+            result.get("model_key") or "gpt-sol", {}
+        ).get("provider", "openai"),
         "pipeline": result.get("pipeline") or "agent:retrieve+memory",
         "image_description": image_desc,
-        "fallback": (result.get("model_key") == "gpt-sol"),
+        "fallback": (result.get("model_key") == "qwen2.5-7b"),
         "errors": result.get("errors") or errors,
         "code_hits": _hit_summaries(code_hits),
         "memory": True,
@@ -232,26 +232,26 @@ def iter_chat_turn_stream(
     yield {
         "type": "meta",
         "stage": "answer",
-        "key": "qwen2.5-7b",
+        "key": "gpt-sol",
         "message": "正在生成回答（记忆 + 代码证据）…",
         "memory_messages": len(openai_history),
         "hit_count": len(code_hits),
     }
 
     full_reply = ""
-    answer_key = "qwen2.5-7b"
-    answer_model = llm_service._resolve_model_name("qwen2.5-7b", cfg)  # noqa: SLF001
+    answer_key = "gpt-sol"
+    answer_model = llm_service._resolve_model_name("gpt-sol", cfg)  # noqa: SLF001
     fallback = False
     pipeline = (
-        "agent:ocr->retrieve->qwen2.5-7b+memory"
+        "agent:ocr->retrieve->gpt-sol+memory"
         if image_list
-        else "agent:retrieve->qwen2.5-7b+memory"
+        else "agent:retrieve->gpt-sol+memory"
     )
-    qwen_ok = False
+    primary_ok = False
 
     for ev in llm_service.iter_chat_messages_stream(
         messages=openai_messages,
-        model_key="qwen2.5-7b",
+        model_key="gpt-sol",
         settings=cfg,
     ):
         if ev["type"] == "start":
@@ -265,39 +265,39 @@ def iter_chat_turn_stream(
         elif ev["type"] == "delta":
             yield {"type": "delta", "text": ev.get("text") or ""}
         elif ev["type"] == "end":
-            qwen_ok = True
+            primary_ok = True
             full_reply = ev.get("reply") or ""
-            answer_key = "qwen2.5-7b"
+            answer_key = "gpt-sol"
         elif ev["type"] == "error":
-            errors.append(f"qwen2.5-7b: {ev.get('message')}")
+            errors.append(f"gpt-sol: {ev.get('message')}")
 
-    if not qwen_ok:
+    if not primary_ok:
         pipeline = (
-            "agent:ocr->retrieve->fallback:gpt-sol+memory"
+            "agent:ocr->retrieve->fallback:qwen2.5-7b+memory"
             if image_list
-            else "agent:retrieve->fallback:gpt-sol+memory"
+            else "agent:retrieve->fallback:qwen2.5-7b+memory"
         )
         yield {
             "type": "meta",
             "stage": "fallback",
-            "key": "gpt-sol",
-            "message": "本地模型不可用，切换 gpt-sol…",
+            "key": "qwen2.5-7b",
+            "message": "公司模型不可用，切换本地千问…",
         }
         for ev in llm_service.iter_chat_messages_stream(
             messages=openai_messages,
-            model_key="gpt-sol",
+            model_key="qwen2.5-7b",
             settings=cfg,
         ):
             if ev["type"] == "start":
-                answer_key = "gpt-sol"
+                answer_key = "qwen2.5-7b"
                 answer_model = ev.get("model") or llm_service._resolve_model_name(  # noqa: SLF001
-                    "gpt-sol", cfg
+                    "qwen2.5-7b", cfg
                 )
                 fallback = True
                 yield {
                     "type": "meta",
                     "stage": "answer_start",
-                    "key": "gpt-sol",
+                    "key": "qwen2.5-7b",
                     "model": answer_model,
                     "fallback": True,
                 }
@@ -305,11 +305,14 @@ def iter_chat_turn_stream(
                 yield {"type": "delta", "text": ev.get("text") or ""}
             elif ev["type"] == "end":
                 full_reply = ev.get("reply") or ""
-                answer_key = "gpt-sol"
+                answer_key = "qwen2.5-7b"
                 fallback = True
             elif ev["type"] == "error":
-                errors.append(f"gpt-sol: {ev.get('message')}")
-                yield {"type": "error", "message": str(ev.get("message") or "gpt-sol 失败")}
+                errors.append(f"qwen2.5-7b: {ev.get('message')}")
+                yield {
+                    "type": "error",
+                    "message": str(ev.get("message") or "qwen2.5-7b 失败"),
+                }
                 return
 
     if not full_reply and errors:
