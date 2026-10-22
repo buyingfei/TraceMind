@@ -30,6 +30,9 @@ langgraph-sdk==0.3.9
 # LangGraph 本地 Agent Server、Studio、热重载
 langgraph-cli[inmem]==0.4.30
 
+# Deep Agents（create_deep_agent + Agent Skills）
+deepagents==0.7.30
+
 # =========================================================
 # MCP / FastMCP 集成
 # 作用：构建 MCP Server、连接 MCP 工具、资源、Prompt

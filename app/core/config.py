@@ -136,6 +136,10 @@ class Settings(BaseSettings):
         default=3,
         description="单轮对话最多工具调用轮数（查库等）",
     )
+    use_deep_agent: bool = Field(
+        default=True,
+        description="True=create_deep_agent+skills；False=经典 OpenAI tool_loop",
+    )
 
     @property
     def milvus_uri(self) -> str:

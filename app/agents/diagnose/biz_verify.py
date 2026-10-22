@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+from app.agents.skills import skill_suffix_for_intent
+
 BizIntent = Literal["scan_tyre", "warranty_plate", "generic_biz", "none"]
 
 # 胎号常见为较长数字
@@ -38,8 +40,11 @@ SQL_COOKBOOK_SCAN = """\
 【扫码核对——推理用，勿写入对用户回复】
 - 查胎号扫码明细：调用 `query_scan_tyre_records(tyre_code, parent_code?)`。
   分片键 `parent_code`，物理表 `t_scan_store_record_tyre_0..63`；禁止查逻辑表。
+- K1 主数据先查 `t_shop_info`；K2 先查 `t_store_info`（`account_num`→所属 K1）。
+- K1 扫码明细表族：`t_scan_supplier_record_tyre_*`，分片键 `org_code`(K1)。
 - `is_auto=1` 为系统自动；A 零出自动且 B 入库非自动 → 多为 B 入库触发。
-- 只用本轮用户消息中的胎号，禁止沿用上一轮对话的胎号/K1。"""
+- 只用本轮用户消息中的胎号，禁止沿用上一轮对话的胎号/K1。
+- 完整分表路由见 skill `biz-sharding-sql`（Deep Agent 会按需 read_file；经典模式注入正文）。"""
 
 SQL_COOKBOOK_WARRANTY = """\
 【质保卡核对——推理用，勿写入对用户回复】
@@ -92,8 +97,11 @@ def looks_like_chain_scan_scene(user_text: str = "", image_description: str = ""
 
 
 def sql_cookbook_suffix(*, intent: BizIntent | None = None) -> str:
+    """查库手册 + 按意图动态挂载 knowledge（分表规则等）。"""
     if intent == "warranty_plate":
-        return "\n\n" + SQL_COOKBOOK_WARRANTY
-    if intent == "scan_tyre":
-        return "\n\n" + SQL_COOKBOOK_SCAN
-    return "\n\n" + SQL_COOKBOOK_SCAN + "\n\n" + SQL_COOKBOOK_WARRANTY
+        base = "\n\n" + SQL_COOKBOOK_WARRANTY
+    elif intent == "scan_tyre":
+        base = "\n\n" + SQL_COOKBOOK_SCAN
+    else:
+        base = "\n\n" + SQL_COOKBOOK_SCAN + "\n\n" + SQL_COOKBOOK_WARRANTY
+    return base + skill_suffix_for_intent(intent)

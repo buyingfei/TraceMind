@@ -140,8 +140,10 @@ READONLY_SQL_TOOL = {
         "description": (
             "通用只读 SQL（SELECT/WITH）。"
             "查门店扫码胎号明细请改用 query_scan_tyre_records（自动分表）；"
-            "禁止查逻辑表 t_scan_store_record_tyre（直连会 0 行）。"
-            "本工具用于连锁关系、门店信息等其他核对；不要用于改数。"
+            "禁止查逻辑表 t_scan_store_record_tyre / t_scan_supplier_record_tyre / t_tyre（直连会 0 行）。"
+            "查 K1 先 t_shop_info(shop_code)；查 K2 先 t_store_info(org_code)，"
+            "用 account_num 作为 parent_code 再算 K2 扫码分表。"
+            "本工具用于主数据、连锁关系、K1 扫码物理表、胎号主档物理表等；不要用于改数。"
         ),
         "parameters": {
             "type": "object",

@@ -244,8 +244,27 @@ def chat_with_optional_tools(
     current_user_text: str = "",
     current_image_description: str = "",
 ) -> dict[str, Any]:
-    """非流式工具循环；require_sql 时按本轮意图强制对应工具。"""
+    """非流式工具循环；require_sql 时按本轮意图强制对应工具。
+
+    默认走 create_deep_agent（skills 渐进加载）；失败则回退经典 tool_loop。
+    """
     cfg = settings or get_settings()
+    if bool(getattr(cfg, "use_deep_agent", False)):
+        try:
+            from app.agents.diagnose.deep_agent_runtime import run_with_deep_agent
+
+            return run_with_deep_agent(
+                messages,
+                model_key=model_key,
+                settings=cfg,
+                on_meta=on_meta,
+                require_sql=require_sql,
+                current_user_text=current_user_text,
+                current_image_description=current_image_description,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("deep agent 失败，回退 tool_loop: %s", exc)
+
     client = llm_service._client_for_provider(  # noqa: SLF001
         llm_service.CHAT_MODEL_CATALOG[model_key]["provider"]
     )

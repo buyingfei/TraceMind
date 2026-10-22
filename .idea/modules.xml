@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/diagnose-agent.iml" filepath="$PROJECT_DIR$/.idea/diagnose-agent.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/TraceMind.iml" filepath="$PROJECT_DIR$/.idea/TraceMind.iml" />
     </modules>
   </component>
 </project>
