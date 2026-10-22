@@ -99,11 +99,18 @@ def run_retrieve(
     user_text: str,
     image_description: str = "",
 ) -> dict[str, Any]:
-    """用户原话 + OCR +（场景匹配时）关键路径补检索。"""
+    """向量检索入口：只找代码证据，不调用对话模型。
+
+    返回的 code_hits 会由 chat_runtime / chat_answer 拼进本轮 user 消息
+    （见 build_evidence_user_suffix），再交给 gpt-sol / Deep Agent 回答。
+    链路：run_retrieve → code_hits → build_openai_messages_for_turn → 调模型。
+    """
+    # 多路 query：用户问句 / OCR /（连锁场景）关键路径关键词
     queries = build_retrieve_queries(
         user_text=user_text,
         image_description=image_description,
     )
+    # 连锁/K2 自动入出库：多取几条，并优先保留关键路径命中
     path_boost = looks_like_chain_scan_scene(user_text, image_description)
     logger.info(
         "retrieve start queries=%s path_boost=%s user=%r",
@@ -111,11 +118,13 @@ def run_retrieve(
         path_boost,
         clip_text(user_text, limit=80),
     )
+    # Milvus 多路 embedding 检索并合并（非 LLM）
     result = code_search.retrieve_for_diagnose(
         queries,
         final_top_k=10 if path_boost else 8,
         prefer_critical=path_boost,
     )
+    # 截断正文，供后续注入 prompt / SSE
     hits = _summarize_hits(result.get("hits") or [], limit=10 if path_boost else 8)
     top = hits[0] if hits else {}
     logger.info(
@@ -126,7 +135,7 @@ def run_retrieve(
         top.get("path") or "",
     )
     return {
-        "code_hits": hits,
+        "code_hits": hits,  # 下游必须带上，否则模型看不到检索结果
         "retrieve_queries": result.get("queries") or queries,
         "index": result.get("index") or {},
         "retrieve_error": result.get("error") or "",

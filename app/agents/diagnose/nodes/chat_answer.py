@@ -132,12 +132,17 @@ def build_evidence_user_suffix(
     user_text: str = "",
     image_description: str = "",
 ) -> str:
-    """检索证据注入：过程可用完整代码；business 仅约束最终回复不复述定位。"""
+    """把 run_retrieve 的 code_hits 拼进本轮 user 消息后缀（连接检索与模型）。
+
+    检索与对话模型不是断开的：hits 在这里变成【内部实现参考】/【代码检索证据】，
+    与用户问题同一条 user content 发给 gpt-sol。business 模式禁止最终回复复述路径/类名。
+    """
     hits = code_hits or []
     mode = audience or resolve_answer_audience()
     intent = detect_biz_intent(user_text, image_description)
     parts: list[str] = []
 
+    # —— 代码证据（来自向量检索）——
     if mode == "technical":
         evidence = format_code_evidence(hits)
         parts.append(f"\n\n【代码检索证据】\n{evidence}")
@@ -203,7 +208,10 @@ def build_openai_messages_for_turn(
     user_text: str = "",
     image_description: str = "",
 ) -> list[dict[str, str]]:
-    """组装含证据的多轮 messages（供流式/同步共用）。"""
+    """组装本轮发给对话模型的 messages：历史 + 用户问句 + 检索证据（+ 查库手册）。
+
+    code_hits 来自 run_retrieve；拼好后交给 chat_with_optional_tools / Deep Agent。
+    """
     mode = audience or resolve_answer_audience()
     history = messages_for_llm(history_messages)
     must_sql = (
@@ -211,6 +219,7 @@ def build_openai_messages_for_turn(
         if require_sql is not None
         else needs_biz_sql_verify(user_text or human_content, image_description)
     )
+    # 用户原文 + 检索证据后缀 = 模型本轮看到的完整 user
     user_content = human_content + build_evidence_user_suffix(
         code_hits=code_hits,
         audience=mode,
@@ -259,6 +268,7 @@ def answer_node(state: ChatAgentState) -> dict[str, Any]:
     used_sql = False
     pipeline = "agent:retrieve->gpt-sol+memory"
 
+    # openai_messages 已含检索证据；此处才调用对话模型（Deep Agent 或 tool_loop）
     try:
         result = chat_with_optional_tools(
             openai_messages,

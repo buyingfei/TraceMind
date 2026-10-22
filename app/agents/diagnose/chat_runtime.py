@@ -216,6 +216,7 @@ def iter_chat_turn_stream(
     if not history_msgs:
         history_msgs = _snapshot_messages(conversation_id)
 
+    # —— ① 向量检索（不调对话模型）：产出 code_hits ——
     yield {
         "type": "meta",
         "stage": "retrieve",
@@ -247,6 +248,7 @@ def iter_chat_turn_stream(
         "path_boost": path_boost,
     }
 
+    # —— ② 把 code_hits 注入本轮 messages（检索与模型在此衔接）——
     audience = resolve_answer_audience(cfg)
     sql_ready = biz_readonly_enabled()
     require_sql = needs_biz_sql_verify(user_text, image_desc) and sql_ready
@@ -254,7 +256,7 @@ def iter_chat_turn_stream(
     openai_messages = build_openai_messages_for_turn(
         history_messages=history_msgs,
         human_content=human,
-        code_hits=code_hits,
+        code_hits=code_hits,  # 检索结果进入 prompt，不是断开另起对话
         audience=audience,
         require_sql=require_sql,
         user_text=user_text,
@@ -298,6 +300,7 @@ def iter_chat_turn_stream(
         else "agent:retrieve->gpt-sol+memory"
     )
 
+    # —— ③ 调对话模型（gpt-sol / Deep Agent）；输入已含检索证据 ——
     try:
         for ev in iter_answer_with_tools(
             openai_messages,
