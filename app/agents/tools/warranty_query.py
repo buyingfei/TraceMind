@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.agents.tools.readonly_sql import _jsonable
+from app.agents.tools.sql_exec import apply_session_timeout, run_with_sql_retry
 from app.infra.biz_db import biz_readonly_enabled, get_biz_readonly_engine
 from app.core.config import get_settings
 
@@ -49,8 +50,6 @@ def query_warranty_by_plate(license_plate: str, *, max_rows: int | None = None) 
     cfg = get_settings()
     limit = max_rows if max_rows is not None else int(cfg.biz_readonly_max_rows)
     limit = max(1, min(limit, 200))
-    # 该表 license_plate 无索引，精确查询也可能较慢，单独放宽超时
-    timeout = max(60, int(cfg.biz_readonly_timeout_sec))
 
     # 不 ORDER BY，避免大表无索引时额外排序拖垮超时
     sql = (
@@ -62,20 +61,21 @@ def query_warranty_by_plate(license_plate: str, *, max_rows: int | None = None) 
         "LIMIT :lim"
     )
 
-    engine = get_biz_readonly_engine()
-    with engine.connect() as conn:
-        try:
-            conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME={timeout * 1000}"))
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            rows_raw = conn.execute(text(sql), {"plate": plate, "lim": limit}).mappings().all()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("质保卡按车牌查询失败 plate=%s: %s", plate, exc)
-            raise RuntimeError(
-                f"质保卡查询超时或失败（t_warranty_detail.license_plate 可能无可用索引）: {exc}"
-            ) from exc
+    def _once() -> list[Any]:
+        engine = get_biz_readonly_engine()
+        with engine.connect() as conn:
+            apply_session_timeout(conn)
+            try:
+                return list(
+                    conn.execute(text(sql), {"plate": plate, "lim": limit}).mappings().all()
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("质保卡按车牌查询失败 plate=%s: %s", plate, exc)
+                raise RuntimeError(
+                    f"质保卡查询超时或失败（t_warranty_detail.license_plate 可能无可用索引）: {exc}"
+                ) from exc
 
+    rows_raw = run_with_sql_retry(_once, label="query_warranty")
     rows = [{k: _jsonable(v) for k, v in dict(r).items()} for r in rows_raw]
     return {
         "ok": True,
@@ -96,6 +96,7 @@ QUERY_WARRANTY_BY_PLATE_TOOL = {
         "name": "query_warranty_by_plate",
         "description": (
             "按车牌号查询质保卡明细表 t_warranty_detail。"
+            "单次超时约 5 分钟，失败自动重试 3 次（skill biz-sql-query）。"
             "用户问「某车牌有没有质保卡 / 对应胎号是什么」时必须用本工具；"
             "不要先查扫码流水，也不要使用上一轮对话里的胎号。"
         ),

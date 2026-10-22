@@ -15,6 +15,7 @@ from app.agents.tools.biz_sharding import (
     store_scan_shard_index,
 )
 from app.agents.tools.readonly_sql import _jsonable
+from app.agents.tools.sql_exec import apply_session_timeout, run_with_sql_retry
 from app.infra.biz_db import biz_readonly_enabled, get_biz_readonly_engine
 from app.core.config import get_settings
 
@@ -96,60 +97,59 @@ def query_scan_tyre_records(
     cfg = get_settings()
     limit = max_rows if max_rows is not None else int(cfg.biz_readonly_max_rows)
     limit = max(1, min(limit, 200))
-    timeout = max(1, int(cfg.biz_readonly_timeout_sec))
 
-    engine = get_biz_readonly_engine()
-    route: dict[str, Any] = {
-        "tyre_code": tyre,
-        "parent_code": parent,
-        "shard_count": SCAN_STORE_TYRE_SHARD_COUNT,
-        "mode": None,
-        "shard_index": None,
-        "shard_table": None,
-    }
-
-    with engine.connect() as conn:
-        try:
-            conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME={timeout * 1000}"))
-        except Exception:  # noqa: BLE001
-            pass
-
-        rows: list[dict[str, Any]] = []
-        if parent:
-            table = scan_store_tyre_table(parent)
-            idx = store_scan_shard_index(parent)
-            route.update(
-                mode="by_parent_code",
-                shard_index=idx,
-                shard_table=table,
-            )
-            try:
-                rows = _query_one_shard(conn, table, tyre, limit=limit)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("分表查询失败 table=%s: %s", table, exc)
-                raise RuntimeError(f"分表查询失败 {table}: {exc}") from exc
-        else:
-            route["mode"] = "scan_all_shards"
-            for table in all_scan_store_tyre_tables():
+    def _once() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        engine = get_biz_readonly_engine()
+        route: dict[str, Any] = {
+            "tyre_code": tyre,
+            "parent_code": parent,
+            "shard_count": SCAN_STORE_TYRE_SHARD_COUNT,
+            "mode": None,
+            "shard_index": None,
+            "shard_table": None,
+        }
+        with engine.connect() as conn:
+            apply_session_timeout(conn)
+            rows: list[dict[str, Any]] = []
+            if parent:
+                table = scan_store_tyre_table(parent)
+                idx = store_scan_shard_index(parent)
+                route.update(
+                    mode="by_parent_code",
+                    shard_index=idx,
+                    shard_table=table,
+                )
                 try:
-                    part = _query_one_shard(conn, table, tyre, limit=limit)
+                    rows = _query_one_shard(conn, table, tyre, limit=limit)
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug("skip shard %s: %s", table, exc)
-                    continue
-                if part:
-                    rows.extend(part)
-                    if len(rows) >= limit:
-                        break
-            rows = sorted(rows, key=lambda r: str(r.get("CREATE_TIME") or ""))[:limit]
-            if rows:
-                # 回填实际命中分表（可能多 parent，取首条）
-                route["shard_table"] = rows[0].get("shard_table")
-                route["parent_code"] = rows[0].get("PARENT_CODE") or parent
-                if route["parent_code"]:
+                    logger.warning("分表查询失败 table=%s: %s", table, exc)
+                    raise RuntimeError(f"分表查询失败 {table}: {exc}") from exc
+            else:
+                route["mode"] = "scan_all_shards"
+                for table in all_scan_store_tyre_tables():
                     try:
-                        route["shard_index"] = store_scan_shard_index(str(route["parent_code"]))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        part = _query_one_shard(conn, table, tyre, limit=limit)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("skip shard %s: %s", table, exc)
+                        continue
+                    if part:
+                        rows.extend(part)
+                        if len(rows) >= limit:
+                            break
+                rows = sorted(rows, key=lambda r: str(r.get("CREATE_TIME") or ""))[:limit]
+                if rows:
+                    route["shard_table"] = rows[0].get("shard_table")
+                    route["parent_code"] = rows[0].get("PARENT_CODE") or parent
+                    if route["parent_code"]:
+                        try:
+                            route["shard_index"] = store_scan_shard_index(
+                                str(route["parent_code"])
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+        return rows, route
+
+    rows, route = run_with_sql_retry(_once, label="query_scan_tyre")
 
     return {
         "ok": True,
@@ -170,6 +170,7 @@ QUERY_SCAN_TYRE_TOOL = {
         "name": "query_scan_tyre_records",
         "description": (
             "查询门店扫码胎号明细（自动按 parent_code 计算分表 t_scan_store_record_tyre_N）。"
+            "单次超时约 5 分钟，失败自动重试 3 次（skill biz-sql-query）。"
             "核对胎号流水、is_auto、门店入出库时优先用本工具；"
             "不要直接查逻辑表 t_scan_store_record_tyre（直连 MySQL 会得到 0 行）。"
             "已知 K1/parent_code（如 CKH0024005）请传入以加速；未知时可只传 tyre_code，工具会扫全部分表。"

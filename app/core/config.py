@@ -131,7 +131,14 @@ class Settings(BaseSettings):
         description="是否允许模型调用只读 SQL 工具",
     )
     biz_readonly_max_rows: int = Field(default=30, description="单次查询最大返回行数")
-    biz_readonly_timeout_sec: int = Field(default=15, description="单次查询超时秒数")
+    biz_readonly_timeout_sec: int = Field(
+        default=300,
+        description="单次业务 SQL 超时秒数（默认 300=5 分钟）",
+    )
+    biz_readonly_sql_retries: int = Field(
+        default=3,
+        description="业务 SQL 失败后重试次数（不含首次；默认 3→最多共 4 次）",
+    )
     agent_max_tool_rounds: int = Field(
         default=3,
         description="单轮对话最多工具调用轮数（查库等）",

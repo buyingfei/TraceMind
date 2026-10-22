@@ -1,6 +1,7 @@
 """业务库只读 SQL（SELECT/WITH only）。
 
 与 app/db（本系统 MySQL）分离；Engine 工厂见 app.infra.biz_db。
+超时/重试策略见 sql_exec（默认 5min、重试 3 次）。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from app.agents.tools.sql_exec import apply_session_timeout, run_with_sql_retry, sql_timeout_sec
 from app.core.config import get_settings
 from app.infra.biz_db import biz_readonly_enabled, get_biz_readonly_engine
 
@@ -49,13 +51,34 @@ def _normalize_sql(sql: str) -> str:
     return raw
 
 
+def _execute_select_once(
+    *,
+    safe_sql: str,
+    wrapped: str,
+    params: dict | None,
+    limit: int,
+) -> tuple[list[str], list[Any]]:
+    engine = get_biz_readonly_engine()
+    with engine.connect() as conn:
+        apply_session_timeout(conn)
+        try:
+            result = conn.execute(text(wrapped), params or {})
+        except Exception:
+            # 某些语句不便包一层子查询时，退回原 SQL + LIMIT
+            fallback_sql = f"{safe_sql} LIMIT {limit + 1}"
+            result = conn.execute(text(fallback_sql), params or {})
+        columns = list(result.keys())
+        fetched = result.fetchmany(limit + 1)
+    return columns, fetched
+
+
 def run_select(
     sql: str,
     params: dict | None = None,
     *,
     max_rows: int | None = None,
 ) -> dict[str, Any]:
-    """执行只读查询，返回 rows / columns / truncated。"""
+    """执行只读查询，返回 rows / columns / truncated（含超时与重试）。"""
     if not biz_readonly_enabled():
         raise RuntimeError("业务只读 SQL 未启用或未配置连接串")
 
@@ -74,22 +97,16 @@ def run_select(
     # 外层再包一层 LIMIT，防止模型漏写
     wrapped = f"SELECT * FROM ({safe_sql}) AS _diag_ro LIMIT {limit + 1}"
 
-    engine = get_biz_readonly_engine()
-    timeout = max(1, int(cfg.biz_readonly_timeout_sec))
     try:
-        with engine.connect() as conn:
-            try:
-                conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME={timeout * 1000}"))
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                result = conn.execute(text(wrapped), params or {})
-            except Exception:
-                # 某些语句不便包一层子查询时，退回原 SQL + LIMIT
-                fallback_sql = f"{safe_sql} LIMIT {limit + 1}"
-                result = conn.execute(text(fallback_sql), params or {})
-            columns = list(result.keys())
-            fetched = result.fetchmany(limit + 1)
+        columns, fetched = run_with_sql_retry(
+            lambda: _execute_select_once(
+                safe_sql=safe_sql,
+                wrapped=wrapped,
+                params=params,
+                limit=limit,
+            ),
+            label="readonly_sql",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("只读 SQL 执行失败: %s | sql=%s", exc, safe_sql[:200])
         raise RuntimeError(f"SQL 执行失败: {exc}") from exc
@@ -99,7 +116,6 @@ def run_select(
     rows: list[dict[str, Any]] = []
     for row in rows_raw:
         mapping = dict(row._mapping)  # noqa: SLF001
-        # JSON 友好
         rows.append({k: _jsonable(v) for k, v in mapping.items()})
 
     return {
@@ -109,6 +125,8 @@ def run_select(
         "row_count": len(rows),
         "truncated": truncated,
         "sql": safe_sql,
+        "timeout_sec": sql_timeout_sec(),
+        "retries": int(cfg.biz_readonly_sql_retries),
     }
 
 
@@ -138,12 +156,13 @@ READONLY_SQL_TOOL = {
     "function": {
         "name": "run_readonly_sql",
         "description": (
-            "通用只读 SQL（SELECT/WITH）。"
+            "通用只读 SQL（SELECT/WITH）。单次超时约 5 分钟，失败自动重试 3 次。"
             "查门店扫码胎号明细请改用 query_scan_tyre_records（自动分表）；"
             "禁止查逻辑表 t_scan_store_record_tyre / t_scan_supplier_record_tyre / t_tyre（直连会 0 行）。"
             "查 K1 先 t_shop_info(shop_code)；查 K2 先 t_store_info(org_code)，"
             "用 account_num 作为 parent_code 再算 K2 扫码分表。"
             "本工具用于主数据、连锁关系、K1 扫码物理表、胎号主档物理表等；不要用于改数。"
+            "执行策略见 skill biz-sql-query。"
         ),
         "parameters": {
             "type": "object",

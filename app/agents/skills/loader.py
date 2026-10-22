@@ -23,8 +23,9 @@ BizIntentLike = Literal["scan_tyre", "warranty_plate", "generic_biz", "none"]
 
 # 意图 → skill 目录名（须与 SKILL.md name / 文件夹名一致）
 _INTENT_SKILLS: dict[str, tuple[str, ...]] = {
-    "scan_tyre": ("biz-sharding-sql",),
-    "generic_biz": ("biz-sharding-sql",),
+    "scan_tyre": ("biz-sql-query", "biz-sharding-sql"),
+    "warranty_plate": ("biz-sql-query",),
+    "generic_biz": ("biz-sql-query", "biz-sharding-sql"),
 }
 
 
@@ -171,11 +172,11 @@ def skill_summaries() -> list[dict[str, str]]:
 
 
 def skill_suffix_for_intent(intent: BizIntentLike | None) -> str:
-    """按业务意图注入对应 skill 正文；质保车牌 / none 不注入。
+    """按业务意图注入对应 skill 正文；none 不注入。
 
     Deep Agent 模式下不注入全文（由 SkillsMiddleware 按 description 渐进加载）。
     """
-    if intent in ("warranty_plate", "none"):
+    if intent == "none":
         return ""
     try:
         from app.core.config import get_settings
@@ -184,8 +185,10 @@ def skill_suffix_for_intent(intent: BizIntentLike | None) -> str:
             return ""
     except Exception:  # noqa: BLE001
         pass
-    # scan_tyre / generic_biz / None(cookbook 兜底) → 分表 skill
-    names = _INTENT_SKILLS.get(intent or "scan_tyre", ("biz-sharding-sql",))
+    names = _INTENT_SKILLS.get(
+        intent or "scan_tyre",
+        ("biz-sql-query", "biz-sharding-sql"),
+    )
     parts: list[str] = []
     for name in names:
         info = load_skill(name)

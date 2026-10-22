@@ -122,6 +122,7 @@ def build_biz_tools() -> list[StructuredTool]:
             name="query_scan_tyre_records",
             description=(
                 "查询门店扫码胎号明细（自动按 parent_code 计算分表 t_scan_store_record_tyre_N）。"
+                "单次超时约 5 分钟，失败自动重试 3 次。"
                 "核对胎号流水、is_auto、门店入出库时优先用本工具；"
                 "不要直接查逻辑表 t_scan_store_record_tyre。"
                 "已知 K1/parent_code 请传入；未知时可只传 tyre_code。"
@@ -132,6 +133,7 @@ def build_biz_tools() -> list[StructuredTool]:
             name="query_warranty_by_plate",
             description=(
                 "按车牌查询质保卡（t_warranty_detail）。"
+                "单次超时约 5 分钟，失败自动重试 3 次。"
                 "用户问某车牌有没有质保卡/对应胎号时必须用本工具；不要先查扫码流水。"
             ),
         ),
@@ -142,9 +144,10 @@ def build_biz_tools() -> list[StructuredTool]:
                 func=_sql,
                 name="run_readonly_sql",
                 description=(
-                    "通用只读 SQL（SELECT/WITH）。"
+                    "通用只读 SQL（SELECT/WITH）。单次超时约 5 分钟，失败自动重试 3 次。"
                     "查门店扫码胎号明细请改用 query_scan_tyre_records；"
                     "禁止查逻辑表。查 K1 先 t_shop_info；查 K2 先 t_store_info。"
+                    "执行策略见 skill biz-sql-query。"
                 ),
             )
         )

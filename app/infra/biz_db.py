@@ -16,12 +16,19 @@ def get_biz_readonly_engine() -> Engine:
     url = (cfg.biz_readonly_database_url or "").strip()
     if not url:
         raise RuntimeError("未配置 BIZ_READONLY_DATABASE_URL（业务只读库）")
+    # 与 BIZ_READONLY_TIMEOUT_SEC 对齐（默认 5min），避免驱动侧先断
+    timeout = max(1, int(cfg.biz_readonly_timeout_sec))
     return create_engine(
         url,
         pool_pre_ping=True,
         pool_size=2,
         max_overflow=2,
         pool_recycle=1800,
+        connect_args={
+            "read_timeout": timeout,
+            "write_timeout": timeout,
+            "connect_timeout": min(60, timeout),
+        },
     )
 
 
