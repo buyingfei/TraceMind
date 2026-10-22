@@ -18,7 +18,6 @@ from app.infra.biz_db import biz_readonly_enabled, get_biz_readonly_engine
 
 # 兼容旧 import 路径（工具 / 节点仍可从本模块取 Engine 开关）
 __all__ = [
-    "READONLY_SQL_TOOL",
     "biz_readonly_enabled",
     "get_biz_readonly_engine",
     "run_select",
@@ -151,32 +150,4 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-READONLY_SQL_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "run_readonly_sql",
-        "description": (
-            "通用只读 SQL（SELECT/WITH）。单次超时约 5 分钟，失败自动重试 3 次。"
-            "查门店扫码胎号明细请改用 query_scan_tyre_records（自动分表）；"
-            "禁止查逻辑表 t_scan_store_record_tyre / t_scan_supplier_record_tyre / t_tyre（直连会 0 行）。"
-            "查 K1 先 t_shop_info(shop_code)；查 K2 先 t_store_info(org_code)，"
-            "用 account_num 作为 parent_code 再算 K2 扫码分表。"
-            "本工具用于主数据、连锁关系、K1 扫码物理表、胎号主档物理表等；不要用于改数。"
-            "执行策略见 skill biz-sql-query。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "sql": {
-                    "type": "string",
-                    "description": "单条 SELECT 或 WITH ... SELECT，不要分号结尾",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "简要说明为何需要查库（给系统日志用）",
-                },
-            },
-            "required": ["sql"],
-        },
-    },
-}
+# OpenAI schema / @tool 定义见 app.agents.tools.biz_lc_tools

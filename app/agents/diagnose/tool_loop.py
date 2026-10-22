@@ -8,22 +8,10 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from app.agents.diagnose.biz_verify import BizIntent, detect_biz_intent
-from app.agents.tools.readonly_sql import (
-    READONLY_SQL_TOOL,
-    biz_readonly_enabled,
-    run_select,
-)
-from app.agents.tools.scan_tyre_query import (
-    QUERY_SCAN_TYRE_TOOL,
-    extract_parent_code,
-    extract_tyre_code,
-    query_scan_tyre_records,
-)
-from app.agents.tools.warranty_query import (
-    QUERY_WARRANTY_BY_PLATE_TOOL,
-    extract_license_plate,
-    query_warranty_by_plate,
-)
+from app.agents.tools.biz_lc_tools import biz_tool_by_name, openai_biz_tools
+from app.agents.tools.readonly_sql import biz_readonly_enabled
+from app.agents.tools.scan_tyre_query import extract_parent_code, extract_tyre_code
+from app.agents.tools.warranty_query import extract_license_plate
 from app.core.config import get_settings
 from app.core.logging import clip_text
 from app.services import llm_service
@@ -58,46 +46,47 @@ def _last_user_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
-def run_readonly_sql_tool(arguments: dict[str, Any] | str) -> dict[str, Any]:
+def _parse_tool_args(arguments: dict[str, Any] | str) -> dict[str, Any]:
     if isinstance(arguments, str):
         try:
-            arguments = json.loads(arguments or "{}")
+            return json.loads(arguments or "{}")
         except json.JSONDecodeError:
-            arguments = {"sql": arguments}
-    sql = str((arguments or {}).get("sql") or "").strip()
-    reason = str((arguments or {}).get("reason") or "").strip()
-    if reason:
-        logger.info("readonly_sql reason=%s", reason[:200])
-    return run_select(sql)
+            return {}
+    return dict(arguments or {})
+
+
+def invoke_biz_tool(name: str, arguments: dict[str, Any] | str) -> dict[str, Any]:
+    """执行 @tool 业务工具，返回 dict（工具内部返回 JSON 字符串）。"""
+    tool = biz_tool_by_name().get(name)
+    if tool is None:
+        return {"ok": False, "error": f"未知工具: {name}"}
+    args = _parse_tool_args(arguments)
+    try:
+        out = tool.invoke(args)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    if isinstance(out, dict):
+        return out
+    if isinstance(out, str):
+        try:
+            parsed = json.loads(out)
+            return parsed if isinstance(parsed, dict) else {"ok": True, "raw": out}
+        except json.JSONDecodeError:
+            return {"ok": True, "raw": out}
+    return {"ok": True, "raw": out}
+
+
+# 兼容旧调用名
+def run_readonly_sql_tool(arguments: dict[str, Any] | str) -> dict[str, Any]:
+    return invoke_biz_tool("run_readonly_sql", arguments)
 
 
 def run_query_scan_tyre_tool(arguments: dict[str, Any] | str) -> dict[str, Any]:
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments or "{}")
-        except json.JSONDecodeError:
-            arguments = {"tyre_code": arguments}
-    args = arguments or {}
-    tyre = str(args.get("tyre_code") or "").strip()
-    parent = str(args.get("parent_code") or "").strip() or None
-    reason = str(args.get("reason") or "").strip()
-    if reason:
-        logger.info("query_scan_tyre reason=%s tyre=%s parent=%s", reason[:160], tyre, parent)
-    return query_scan_tyre_records(tyre, parent_code=parent)
+    return invoke_biz_tool("query_scan_tyre_records", arguments)
 
 
 def run_query_warranty_tool(arguments: dict[str, Any] | str) -> dict[str, Any]:
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments or "{}")
-        except json.JSONDecodeError:
-            arguments = {"license_plate": arguments}
-    args = arguments or {}
-    plate = str(args.get("license_plate") or "").strip()
-    reason = str(args.get("reason") or "").strip()
-    if reason:
-        logger.info("query_warranty reason=%s plate=%s", reason[:160], plate)
-    return query_warranty_by_plate(plate)
+    return invoke_biz_tool("query_warranty_by_plate", arguments)
 
 
 def _create_with_retry(client, *, kwargs: dict[str, Any], attempts: int):
@@ -179,14 +168,7 @@ def _execute_tool_calls(
                 }
             )
         try:
-            if name == "query_scan_tyre_records":
-                payload = run_query_scan_tyre_tool(raw_args)
-            elif name == "query_warranty_by_plate":
-                payload = run_query_warranty_tool(raw_args)
-            elif name == "run_readonly_sql":
-                payload = run_readonly_sql_tool(raw_args)
-            else:
-                payload = {"ok": False, "error": f"未知工具: {name}"}
+            payload = invoke_biz_tool(name, raw_args)
             if "error" not in payload:
                 payload.setdefault("ok", True)
         except Exception as exc:  # noqa: BLE001
@@ -270,15 +252,8 @@ def chat_with_optional_tools(
     )
     model_name = llm_service._resolve_model_name(model_key, cfg)  # noqa: SLF001
     working: list[dict[str, Any]] = [dict(m) for m in messages]
-    tools = (
-        [
-            QUERY_WARRANTY_BY_PLATE_TOOL,
-            QUERY_SCAN_TYRE_TOOL,
-            READONLY_SQL_TOOL,
-        ]
-        if biz_readonly_enabled()
-        else []
-    )
+    # schema 由 @tool 派生（与 Deep Agent 同源）
+    tools = openai_biz_tools() if biz_readonly_enabled() else []
     max_rounds = max(0, int(cfg.agent_max_tool_rounds))
     traces: list[dict[str, Any]] = []
     attempts = max(1, int(cfg.llm_max_attempts))

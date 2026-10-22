@@ -90,29 +90,4 @@ def query_warranty_by_plate(license_plate: str, *, max_rows: int | None = None) 
     }
 
 
-QUERY_WARRANTY_BY_PLATE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "query_warranty_by_plate",
-        "description": (
-            "按车牌号查询质保卡明细表 t_warranty_detail。"
-            "单次超时约 5 分钟，失败自动重试 3 次（skill biz-sql-query）。"
-            "用户问「某车牌有没有质保卡 / 对应胎号是什么」时必须用本工具；"
-            "不要先查扫码流水，也不要使用上一轮对话里的胎号。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "license_plate": {
-                    "type": "string",
-                    "description": "车牌号，如 晋D019X0",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "查库目的（日志用）",
-                },
-            },
-            "required": ["license_plate"],
-        },
-    },
-}
+# OpenAI schema / @tool 定义见 app.agents.tools.biz_lc_tools

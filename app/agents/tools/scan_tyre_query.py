@@ -164,34 +164,4 @@ def query_scan_tyre_records(
     }
 
 
-QUERY_SCAN_TYRE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "query_scan_tyre_records",
-        "description": (
-            "查询门店扫码胎号明细（自动按 parent_code 计算分表 t_scan_store_record_tyre_N）。"
-            "单次超时约 5 分钟，失败自动重试 3 次（skill biz-sql-query）。"
-            "核对胎号流水、is_auto、门店入出库时优先用本工具；"
-            "不要直接查逻辑表 t_scan_store_record_tyre（直连 MySQL 会得到 0 行）。"
-            "已知 K1/parent_code（如 CKH0024005）请传入以加速；未知时可只传 tyre_code，工具会扫全部分表。"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "tyre_code": {
-                    "type": "string",
-                    "description": "胎号，如 9001462521",
-                },
-                "parent_code": {
-                    "type": "string",
-                    "description": "分片键 K1/parent_code（如 CKH0024005）；可选",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "简要说明查库目的（日志用）",
-                },
-            },
-            "required": ["tyre_code"],
-        },
-    },
-}
+# OpenAI schema / @tool 定义见 app.agents.tools.biz_lc_tools

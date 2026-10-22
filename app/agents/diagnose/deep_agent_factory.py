@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
-from app.agents.tools.readonly_sql import biz_readonly_enabled, run_select
-from app.agents.tools.scan_tyre_query import query_scan_tyre_records
-from app.agents.tools.warranty_query import query_warranty_by_plate
+from app.agents.tools.biz_lc_tools import list_biz_lc_tools
+from app.agents.tools.readonly_sql import biz_readonly_enabled
 from app.core.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -74,84 +72,11 @@ def build_chat_model(settings: Settings | None = None) -> ChatOpenAI:
         return ChatOpenAI(**kwargs)
 
 
-def _json_tool_result(data: dict[str, Any], *, max_chars: int = 6000) -> str:
-    text = json.dumps(data, ensure_ascii=False, default=str)
-    if len(text) > max_chars:
-        return text[: max_chars - 20] + "…(truncated)"
-    return text
-
-
-def build_biz_tools() -> list[StructuredTool]:
-    """与 tool_loop 同源的业务工具（LangChain StructuredTool）。"""
-
-    def _scan(tyre_code: str, parent_code: str = "", reason: str = "") -> str:
-        if reason:
-            logger.info("deep-agent query_scan_tyre reason=%s", reason[:160])
-        parent = (parent_code or "").strip() or None
-        try:
-            payload = query_scan_tyre_records(tyre_code, parent_code=parent)
-            payload.setdefault("ok", True)
-        except Exception as exc:  # noqa: BLE001
-            payload = {"ok": False, "error": str(exc)}
-        return _json_tool_result(payload)
-
-    def _warranty(license_plate: str, reason: str = "") -> str:
-        if reason:
-            logger.info("deep-agent query_warranty reason=%s", reason[:160])
-        try:
-            payload = query_warranty_by_plate(license_plate)
-            payload.setdefault("ok", True)
-        except Exception as exc:  # noqa: BLE001
-            payload = {"ok": False, "error": str(exc)}
-        return _json_tool_result(payload)
-
-    def _sql(sql: str, reason: str = "") -> str:
-        if reason:
-            logger.info("deep-agent readonly_sql reason=%s", reason[:200])
-        try:
-            payload = run_select(sql)
-            if "error" not in payload:
-                payload.setdefault("ok", True)
-        except Exception as exc:  # noqa: BLE001
-            payload = {"ok": False, "error": str(exc)}
-        return _json_tool_result(payload)
-
-    tools = [
-        StructuredTool.from_function(
-            func=_scan,
-            name="query_scan_tyre_records",
-            description=(
-                "查询门店扫码胎号明细（自动按 parent_code 计算分表 t_scan_store_record_tyre_N）。"
-                "单次超时约 5 分钟，失败自动重试 3 次。"
-                "核对胎号流水、is_auto、门店入出库时优先用本工具；"
-                "不要直接查逻辑表 t_scan_store_record_tyre。"
-                "已知 K1/parent_code 请传入；未知时可只传 tyre_code。"
-            ),
-        ),
-        StructuredTool.from_function(
-            func=_warranty,
-            name="query_warranty_by_plate",
-            description=(
-                "按车牌查询质保卡（t_warranty_detail）。"
-                "单次超时约 5 分钟，失败自动重试 3 次。"
-                "用户问某车牌有没有质保卡/对应胎号时必须用本工具；不要先查扫码流水。"
-            ),
-        ),
-    ]
-    if biz_readonly_enabled():
-        tools.append(
-            StructuredTool.from_function(
-                func=_sql,
-                name="run_readonly_sql",
-                description=(
-                    "通用只读 SQL（SELECT/WITH）。单次超时约 5 分钟，失败自动重试 3 次。"
-                    "查门店扫码胎号明细请改用 query_scan_tyre_records；"
-                    "禁止查逻辑表。查 K1 先 t_shop_info；查 K2 先 t_store_info。"
-                    "执行策略见 skill biz-sql-query。"
-                ),
-            )
-        )
-    return tools
+def build_biz_tools() -> list[BaseTool]:
+    """业务工具：来自 @tool 定义（app.agents.tools.biz_lc_tools）。"""
+    if not biz_readonly_enabled():
+        return []
+    return list_biz_lc_tools()
 
 
 @lru_cache(maxsize=4)
@@ -170,7 +95,7 @@ def get_deep_agent(*, system_prompt: str, model_key: str = "gpt-sol"):
 
     backend = FilesystemBackend(root_dir=str(root), virtual_mode=True)
     model = build_chat_model(cfg)
-    tools = build_biz_tools() if biz_readonly_enabled() else []
+    tools = build_biz_tools()
 
     agent = create_deep_agent(
         model=model,
